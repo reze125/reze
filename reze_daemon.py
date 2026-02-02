@@ -1,0 +1,456 @@
+"""REZE Daemon — FastAPI 서버 + 태스크 큐 + 스케줄러 + 능동적 판단"""
+import asyncio
+import time
+import json
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import aiohttp
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+import config
+from ssot import SSOT
+from reze_permissions import PermissionSystem
+from reze_tools import ToolExecutor
+from reze_core import REZECore, ModelRouter, CircuitBreaker
+from skills_manager import SkillsManager
+from redaction import mask_text
+
+import logging
+
+# === 로깅 설정 ===
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("REZE.daemon")
+
+
+# ============================================================
+# 글로벌 상태 (lifespan에서 초기화)
+# ============================================================
+class AppState:
+    ssot: SSOT = None
+    permissions: PermissionSystem = None
+    tools: ToolExecutor = None
+    router: ModelRouter = None
+    skills: SkillsManager = None
+    circuit_breaker: CircuitBreaker = None
+    core: REZECore = None
+    scheduler: AsyncIOScheduler = None
+    notifier: "WebhookNotifier" = None
+    queue_worker_task: asyncio.Task = None
+
+state = AppState()
+
+
+# ============================================================
+# WebhookNotifier — 결과 알림
+# ============================================================
+class WebhookNotifier:
+    """태스크 완료 시 webhook 알림. 3회 재시도."""
+
+    def __init__(self, url: str = ""):
+        self.url = url or config.WEBHOOK_URL
+
+    async def notify(self, task_id: str, result: dict):
+        if not self.url:
+            return
+        payload = {
+            "event": "task_complete",
+            "task_id": task_id,
+            "success": result.get("success", False),
+            "answer_preview": str(result.get("answer", ""))[:200],
+            "steps": result.get("steps", 0),
+            "total_tokens": result.get("total_tokens", 0),
+        }
+        delays = [1, 5, 15]
+        for attempt, delay in enumerate(delays):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.url,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status < 400:
+                            logger.info(f"Webhook sent: {task_id}")
+                            return
+                        logger.warning(f"Webhook HTTP {resp.status} (attempt {attempt+1})")
+            except Exception as e:
+                logger.warning(f"Webhook failed (attempt {attempt+1}): {e}")
+            if attempt < len(delays) - 1:
+                await asyncio.sleep(delay)
+        logger.error(f"Webhook failed after 3 attempts: {task_id}")
+
+
+# ============================================================
+# TaskQueue Worker — 순차 실행
+# ============================================================
+async def queue_worker():
+    """pending 태스크를 하나씩 꺼내서 실행. worker=1."""
+    logger.info("Queue worker started")
+    while True:
+        try:
+            task = state.ssot.pop_next_pending()
+            if task is None:
+                await asyncio.sleep(2)
+                continue
+
+            task_id = task["id"]
+            task_spec = task["task_spec"]
+            source = task.get("source", "api")
+
+            logger.info(f"Processing: {task_id} — {task_spec[:80]}")
+
+            try:
+                result = await state.core.run(task_spec, source=source)
+
+                status = "success" if result["success"] else "failed"
+                state.ssot.complete_daemon_task(
+                    task_id, status, json.dumps(result, ensure_ascii=False)
+                )
+
+                # Webhook 알림
+                if state.notifier:
+                    await state.notifier.notify(task_id, result)
+
+                logger.info(f"Completed: {task_id} ({status}, {result['steps']} steps)")
+
+            except Exception as e:
+                logger.error(f"Task failed: {task_id} — {e}")
+                state.ssot.complete_daemon_task(task_id, "error", str(e))
+
+        except asyncio.CancelledError:
+            logger.info("Queue worker shutting down")
+            break
+        except Exception as e:
+            logger.error(f"Queue worker error: {e}")
+            await asyncio.sleep(5)
+
+
+# ============================================================
+# 스케줄러 Jobs — 능동적 판단
+# ============================================================
+async def health_check_job():
+    """매시간: 서버 상태 체크 → 이상 있으면 신호 저장."""
+    logger.info("Running health check")
+    try:
+        result = await state.tools.execute("shell", "df -h / | tail -1", source="schedule")
+        state.ssot.save_signal("disk", result)
+
+        result = await state.tools.execute("shell", "free -h | grep Mem", source="schedule")
+        state.ssot.save_signal("memory", result)
+
+        result = await state.tools.execute(
+            "shell",
+            "docker ps --format '{{.Names}}:{{.Status}}' 2>/dev/null || echo 'docker not available'",
+            source="schedule",
+        )
+        state.ssot.save_signal("docker", result)
+
+        result = await state.tools.execute(
+            "shell",
+            "pm2 jlist 2>/dev/null | python3 -c \"import sys,json; data=json.load(sys.stdin); print(','.join(f'{p[\\\"name\\\"]}:{p[\\\"pm2_env\\\"][\\\"status\\\"]}' for p in data))\" 2>/dev/null || echo 'pm2 not available'",
+            source="schedule",
+        )
+        state.ssot.save_signal("pm2", result)
+
+        logger.info("Health check completed")
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+
+
+async def judgment_job():
+    """6시간마다: 최근 신호를 보고 '할 일 있나?' 판단. LLM 1회."""
+    logger.info("Running judgment engine")
+    try:
+        # 최근 6시간 신호 수집
+        signals = state.ssot.get_recent_signals(hours=6)
+        if not signals:
+            logger.info("No signals to judge")
+            return
+
+        signals_text = "\n".join(
+            f"[{s['kind']}] {s['data'][:200]}" for s in signals[:20]
+        )
+
+        # LLM에게 판단 요청
+        response = await state.router.call(
+            "reasoning",
+            [{
+                "role": "user",
+                "content": (
+                    f"너는 서버 관리 AI다. 최근 6시간 시스템 신호를 분석해라:\n\n"
+                    f"{signals_text}\n\n"
+                    f"문제가 있거나 조치가 필요한 것이 있으면 JSON 배열로 태스크를 제안해라:\n"
+                    f'[{{"task": "설명", "priority": 1-5}}]\n\n'
+                    f"문제 없으면 빈 배열 []을 반환해라.\n"
+                    f"JSON만 반환. 다른 텍스트 금지."
+                )
+            }],
+            system="시스템 신호를 분석하고 필요한 조치를 판단하는 전문가.",
+        )
+
+        # 파싱
+        text = response.text.strip()
+        # fence 제거
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        try:
+            tasks = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"Judgment parse failed: {text[:100]}")
+            return
+
+        if not isinstance(tasks, list) or not tasks:
+            logger.info("Judgment: no action needed")
+            return
+
+        # 태스크 큐에 추가
+        for t in tasks[:3]:  # 최대 3개
+            if isinstance(t, dict) and "task" in t:
+                priority = min(max(int(t.get("priority", 1)), 1), 5)
+                task_id = state.ssot.enqueue(
+                    t["task"], priority=priority, source="judgment"
+                )
+                logger.info(f"Judgment created task: {task_id} — {t['task'][:60]}")
+
+    except Exception as e:
+        logger.error(f"Judgment engine failed: {e}")
+
+
+async def self_review_job():
+    """매주 월요일: 지난 주 실행 결과 분석. 자기 리뷰."""
+    logger.info("Running weekly self-review")
+    try:
+        recent = state.ssot.get_recent_tasks(limit=50)
+        if not recent:
+            return
+
+        total = len(recent)
+        success = sum(1 for t in recent if t.get("status") == "success")
+        failed = sum(1 for t in recent if t.get("status") in ("error", "failed", "incomplete"))
+
+        summary = (
+            f"최근 태스크 {total}개: 성공 {success}, 실패 {failed}, "
+            f"성공률 {success/total*100:.0f}%"
+        )
+
+        state.ssot.save_signal("self_review", summary)
+        logger.info(f"Self-review: {summary}")
+
+    except Exception as e:
+        logger.error(f"Self-review failed: {e}")
+
+
+# ============================================================
+# Lifespan — 초기화 + 종료
+# ============================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """서버 시작/종료 관리."""
+    logger.info("=== REZE Agent v3.3 Starting ===")
+
+    # 초기화
+    state.ssot = SSOT()
+    state.permissions = PermissionSystem()
+    state.tools = ToolExecutor(state.ssot, state.permissions)
+    state.router = ModelRouter(state.ssot)
+    state.skills = SkillsManager()
+    state.circuit_breaker = CircuitBreaker(state.ssot)
+    state.core = REZECore(
+        state.ssot, state.tools, state.permissions,
+        state.router, state.skills, state.circuit_breaker,
+    )
+    state.notifier = WebhookNotifier()
+
+    # 스케줄러
+    state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+    state.scheduler.add_job(health_check_job, "interval", hours=1, id="health_check")
+    state.scheduler.add_job(judgment_job, "interval", hours=6, id="judgment")
+    state.scheduler.add_job(self_review_job, "cron", day_of_week="mon", hour=9, id="self_review")
+    state.scheduler.start()
+
+    # 큐 워커
+    state.queue_worker_task = asyncio.create_task(queue_worker())
+
+    providers = list(state.router.providers.keys())
+    skills_count = len(state.skills.catalog)
+    logger.info(f"Providers: {providers}")
+    logger.info(f"Skills: {skills_count}")
+    logger.info(f"Scheduler jobs: {[j.id for j in state.scheduler.get_jobs()]}")
+    logger.info("=== REZE Agent v3.3 Ready ===")
+
+    yield
+
+    # 종료
+    logger.info("=== REZE Agent Shutting Down ===")
+    state.scheduler.shutdown(wait=False)
+
+    if state.queue_worker_task:
+        state.queue_worker_task.cancel()
+        try:
+            await state.queue_worker_task
+        except asyncio.CancelledError:
+            pass
+
+    state.ssot.close()
+    logger.info("=== REZE Agent Stopped ===")
+
+
+# ============================================================
+# FastAPI App
+# ============================================================
+app = FastAPI(
+    title="REZE Agent",
+    version="3.3",
+    lifespan=lifespan,
+)
+
+
+# === 인증 ===
+async def verify_token(authorization: Optional[str] = Header(None)):
+    """Bearer token 검증."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    parts = authorization.split(" ")
+    if len(parts) != 2 or parts[0] != "Bearer":
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
+    if parts[1] != config.REZE_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return parts[1]
+
+
+# === Request/Response 모델 ===
+class RunRequest(BaseModel):
+    task: str
+    priority: int = 1
+    source: str = "api"
+    sync: bool = False  # True면 즉시 실행, False면 큐에 추가
+
+class RunResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+class TaskResult(BaseModel):
+    success: Optional[bool] = None
+    answer: Optional[str] = None
+    steps: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
+# === 엔드포인트 ===
+
+@app.get("/health")
+async def health():
+    """헬스체크 (인증 없음)."""
+    return {"status": "ok", "version": "3.3", "agent": "REZE"}
+
+
+@app.get("/health/detail")
+async def health_detail(_=Depends(verify_token)):
+    """상세 헬스체크."""
+    return {
+        "status": "ok",
+        "version": "3.3",
+        "providers": list(state.router.providers.keys()),
+        "skills": list(state.skills.catalog.keys()),
+        "pending_tasks": state.ssot.count_pending(),
+        "daily_tokens": state.ssot.get_daily_tokens(),
+        "scheduler_jobs": [j.id for j in state.scheduler.get_jobs()],
+    }
+
+
+@app.post("/run", response_model=RunResponse)
+async def run_task(req: RunRequest, _=Depends(verify_token)):
+    """태스크 실행."""
+    if not req.task.strip():
+        raise HTTPException(status_code=400, detail="Task cannot be empty")
+
+    if req.sync:
+        # 즉시 실행 (동기)
+        try:
+            result = await state.core.run(req.task, source=req.source)
+            task_id = result["task_id"]
+
+            # webhook 알림
+            if state.notifier:
+                await state.notifier.notify(task_id, result)
+
+            return RunResponse(
+                task_id=task_id,
+                status="completed",
+                message=json.dumps(result, ensure_ascii=False),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        # 큐에 추가 (비동기)
+        task_id = state.ssot.enqueue(
+            req.task, priority=req.priority, source=req.source
+        )
+        return RunResponse(
+            task_id=task_id,
+            status="queued",
+            message=f"Task queued with priority {req.priority}",
+        )
+
+
+@app.get("/tasks")
+async def list_tasks(_=Depends(verify_token), limit: int = 20):
+    """최근 태스크 목록."""
+    tasks = state.ssot.get_recent_tasks(limit=limit)
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@app.get("/status/{task_id}")
+async def task_status(task_id: str, _=Depends(verify_token)):
+    """태스크 상태 조회."""
+    history = state.ssot.get_task_history(task_id)
+    if not history["task"]:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return history
+
+
+@app.post("/reload-skills")
+async def reload_skills(_=Depends(verify_token)):
+    """스킬 재로딩."""
+    count = state.skills.scan()
+    return {"reloaded": count, "skills": list(state.skills.catalog.keys())}
+
+
+@app.get("/budget")
+async def budget_status(_=Depends(verify_token)):
+    """일일 예산 현황."""
+    return {
+        "date": state.ssot._kst_date(),
+        "total_tokens": state.ssot.get_daily_tokens(),
+        "budget_limit": config.DAILY_TOKEN_BUDGET,
+        "remaining": config.DAILY_TOKEN_BUDGET - state.ssot.get_daily_tokens(),
+        "providers": {
+            "cerebras": state.ssot.get_provider_calls("cerebras"),
+            "groq": state.ssot.get_provider_calls("groq"),
+            "gemini_pro": state.ssot.get_provider_calls("gemini_pro"),
+            "gemini_flash": state.ssot.get_provider_calls("gemini_flash"),
+        }
+    }
+
+
+@app.post("/signal")
+async def manual_signal(kind: str, data: str, _=Depends(verify_token)):
+    """수동 신호 추가 (테스트/외부 연동용)."""
+    sig_id = state.ssot.save_signal(kind, data)
+    return {"signal_id": sig_id}
+
+
+@app.post("/judge-now")
+async def trigger_judgment(_=Depends(verify_token)):
+    """즉시 판단 엔진 실행 (테스트용)."""
+    await judgment_job()
+    return {"status": "judgment executed"}

@@ -1,0 +1,9 @@
+.env
+credentials.json
+moltbook_credentials.json
+moltbook_credentials_apex_backup.json
+reze_data/
+workspace/
+__pycache__/
+*.pyc
+.env.*
