@@ -54,6 +54,11 @@ class ToolExecutor:
         self.repl = SecurePythonREPL()
         self.fs = FilesystemTool()
         self.credentials = CredentialStore()
+        # Tavily 멀티키 라운드로빈
+        self._tavily_keys = config.TAVILY_API_KEYS if config.TAVILY_API_KEYS else (
+            [config.TAVILY_API_KEY] if config.TAVILY_API_KEY else []
+        )
+        self._tavily_idx = 0
 
     async def execute(self, tool: str, tool_input: Any, source: str = "api") -> str:
         """도구 실행 메인 진입점."""
@@ -172,32 +177,49 @@ class ToolExecutor:
             return self.fs.list_dir(path or ".")
         return f"ERROR: Unknown filesystem operation '{op}'"
 
+    def _next_tavily_key(self) -> str:
+        """라운드로빈으로 다음 Tavily 키."""
+        if not self._tavily_keys:
+            return ""
+        key = self._tavily_keys[self._tavily_idx % len(self._tavily_keys)]
+        self._tavily_idx += 1
+        return key
+
     async def _exec_web_search(self, query: str) -> str:
-        """Tavily 웹 검색."""
-        api_key = config.TAVILY_API_KEY
-        if not api_key:
+        """Tavily 웹 검색. 7키 라운드로빈."""
+        if not self._tavily_keys:
             return "ERROR: TAVILY_API_KEY not set"
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": api_key,
-                        "query": query,
-                        "max_results": 5,
-                        "include_answer": True,
-                    },
-                ) as resp:
-                    data = await resp.json()
-                    results = []
-                    if data.get("answer"):
-                        results.append(f"Answer: {data['answer']}")
-                    for r in data.get("results", [])[:5]:
-                        title = r.get("title", "")
-                        content = r.get("content", "")[:150]
-                        results.append(f"- {title}: {content}...")
-                    return "\n\n".join(results) if results else "No results found"
-        except Exception as e:
-            return f"ERROR: Web search failed — {e}"
+        last_error = None
+        for _ in range(len(self._tavily_keys)):
+            api_key = self._next_tavily_key()
+            try:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        "https://api.tavily.com/search",
+                        json={
+                            "api_key": api_key,
+                            "query": query,
+                            "max_results": 5,
+                            "include_answer": True,
+                        },
+                    ) as resp:
+                        data = await resp.json()
+                        results = []
+                        if data.get("answer"):
+                            results.append(f"Answer: {data['answer']}")
+                        for r in data.get("results", [])[:5]:
+                            title = r.get("title", "")
+                            content = r.get("content", "")[:150]
+                            results.append(f"- {title}: {content}...")
+                        return "\n\n".join(results) if results else "No results found"
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                if "429" in str(e) or "rate" in error_str:
+                    logger.warning(f"Tavily key rate limited, trying next")
+                    continue
+                break
+
+        return f"ERROR: Web search failed — {last_error}"

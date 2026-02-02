@@ -105,12 +105,19 @@ class CerebrasProvider:
 # ============================================================
 
 class GroqProvider:
-    """Groq API. Llama-4 Maverick. instructor 지원."""
+    """Groq API. 5키 라운드로빈."""
 
     def __init__(self):
-        self.client = Groq(api_key=config.GROQ_API_KEY)
+        self.keys = config.GROQ_API_KEYS if config.GROQ_API_KEYS else [config.GROQ_API_KEY]
+        self._key_index = 0
         self.model = config.GROQ_MODEL
         self.name = "groq"
+
+    def _next_client(self) -> Groq:
+        """라운드로빈으로 다음 키 선택."""
+        key = self.keys[self._key_index % len(self.keys)]
+        self._key_index += 1
+        return Groq(api_key=key)
 
     async def call(self, messages: list[dict], system: str = "",
                    **kwargs) -> LLMResponse:
@@ -126,26 +133,37 @@ class GroqProvider:
             msgs.append({"role": "system", "content": system})
         msgs.extend(messages)
 
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=msgs,
-                max_tokens=kwargs.get("max_tokens", 2000),
-                temperature=kwargs.get("temperature", 0.3),
-            )
-            text = resp.choices[0].message.content or ""
-            usage = resp.usage
-            return LLMResponse(
-                text=text,
-                input_tokens=usage.prompt_tokens if usage else 0,
-                output_tokens=usage.completion_tokens if usage else 0,
-                total_tokens=usage.total_tokens if usage else 0,
-                model=self.model,
-                provider=self.name,
-            )
-        except Exception as e:
-            logger.error(f"Groq call failed: {e}")
-            raise
+        last_error = None
+        for attempt in range(len(self.keys)):
+            client = self._next_client()
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model,
+                    messages=msgs,
+                    max_tokens=kwargs.get("max_tokens", 2000),
+                    temperature=kwargs.get("temperature", 0.3),
+                )
+                text = resp.choices[0].message.content or ""
+                usage = resp.usage
+                return LLMResponse(
+                    text=text,
+                    input_tokens=usage.prompt_tokens if usage else 0,
+                    output_tokens=usage.completion_tokens if usage else 0,
+                    total_tokens=usage.total_tokens if usage else 0,
+                    model=self.model,
+                    provider=self.name,
+                )
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                if "429" in str(e) or "rate" in error_str or "quota" in error_str:
+                    logger.warning(f"Groq key {self._key_index - 1} rate limited, trying next")
+                    continue
+                else:
+                    logger.error(f"Groq call failed (non-rate-limit): {e}")
+                    raise
+
+        raise RuntimeError(f"All {len(self.keys)} Groq keys exhausted: {last_error}")
 
 
 # ============================================================
