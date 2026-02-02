@@ -341,8 +341,8 @@ class ModelRouter:
         logger.info(f"Available providers: {list(self.providers.keys())}")
 
     async def call(self, step_type: str, messages: list[dict],
-                   system: str = "", **kwargs) -> LLMResponse:
-        """역할 기반 호출. 실패 시 폴백."""
+                   system: str = "", trace_id: str = None, **kwargs) -> LLMResponse:
+        """역할 기반 호출. 실패 시 폴백. trace_id가 있으면 traces 테이블에 기록."""
         # 1. 역할에 맞는 provider 선택
         target = self.ROLE_ASSIGNMENT.get(step_type, "cerebras")
 
@@ -362,13 +362,23 @@ class ModelRouter:
                 logger.warning(f"{provider_name} daily limit reached ({calls}/{limit})")
                 continue
 
+            start = time.monotonic()
             try:
                 provider = self.providers[provider_name]
                 response = await provider.call(messages, system=system, **kwargs)
+                latency = int((time.monotonic() - start) * 1000)
 
                 # 사용량 기록
                 self.ssot.add_tokens(response.total_tokens)
                 self.ssot.increment_provider_calls(provider_name)
+
+                # traces 기록
+                if trace_id:
+                    self.ssot.log_trace(
+                        trace_id, 'llm_call', provider_name, response.model,
+                        response.input_tokens, response.output_tokens,
+                        latency, 'ok' if provider_name == target else 'fallback'
+                    )
 
                 if provider_name != target:
                     logger.info(f"Fallback: {target} → {provider_name} for {step_type}")
@@ -376,8 +386,19 @@ class ModelRouter:
                 return response
 
             except Exception as e:
+                latency = int((time.monotonic() - start) * 1000)
                 last_error = e
                 logger.warning(f"{provider_name} failed for {step_type}: {e}")
+
+                # 에러 trace
+                if trace_id:
+                    error_type = 'rate_limit' if '429' in str(e) else (
+                        'timeout' if 'timeout' in str(e).lower() else 'other'
+                    )
+                    self.ssot.log_trace(
+                        trace_id, 'llm_call', provider_name, '',
+                        0, 0, latency, 'error', error_type, str(e)[:500]
+                    )
                 continue
 
         raise RuntimeError(f"All providers failed for {step_type}: {last_error}")
@@ -555,6 +576,9 @@ class REZECore:
         """메인 ReAct 루프."""
         logger.info(f"Task started: {task[:100]} (source={source})")
 
+        # trace_id 생성
+        trace_id = self.ssot._new_id("trace")
+
         # 1. 스킬 매칭
         relevant_skills = self.skills_manager.find_relevant(task)
         skill_context = ""
@@ -589,7 +613,7 @@ class REZECore:
             # --- LLM 호출 ---
             try:
                 response = await self.router.call(
-                    "tool_call", messages, system=system_prompt
+                    "tool_call", messages, system=system_prompt, trace_id=trace_id
                 )
             except Exception as e:
                 logger.error(f"LLM call failed at step {step + 1}: {e}")
@@ -644,6 +668,13 @@ class REZECore:
             is_success = not observation.startswith("ERROR") and not observation.startswith("BLOCKED")
             self.ssot.update_iteration(iter_id, observation, is_success)
 
+            # 도구 실행 trace
+            self.ssot.log_trace(
+                trace_id, 'tool_exec', tool_name, '',
+                0, 0, 0, 'ok' if is_success else 'error',
+                metadata=str(tool_input)[:200]
+            )
+
             # --- 대화에 추가 ---
             messages.append({"role": "assistant", "content": response.text})
             messages.append({"role": "user", "content": f"Observation:\n{observation}"})
@@ -664,7 +695,8 @@ class REZECore:
                                     "무엇이 잘못되었는지 분석하고, 다른 접근 방식을 제안하세요."
                                 )
                             }],
-                            system="당신은 AI 에이전트의 실패를 분석하는 전문가입니다. 간결하게 핵심만 말하세요."
+                            system="당신은 AI 에이전트의 실패를 분석하는 전문가입니다. 간결하게 핵심만 말하세요.",
+                            trace_id=trace_id
                         )
                         total_tokens_used += reflection_resp.total_tokens
                         messages.append({

@@ -93,6 +93,47 @@ class SSOT:
             data TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        -- v3.3 traces: 모든 LLM 호출 + 도구 실행 추적
+        CREATE TABLE IF NOT EXISTS traces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            span_type TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            latency_ms INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'ok',
+            error_type TEXT,
+            metadata TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_traces_provider ON traces(provider, created_at);
+        CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id);
+
+        -- v3.3 plan_cache: 성공한 실행 계획 캐시
+        CREATE TABLE IF NOT EXISTS plan_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keywords TEXT NOT NULL,
+            task_pattern TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            success_count INTEGER DEFAULT 1,
+            fail_count INTEGER DEFAULT 0,
+            last_used TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- v3.3 biz_metrics: 비즈니스 지표
+        CREATE TABLE IF NOT EXISTS biz_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            metric_type TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            value REAL,
+            unit TEXT,
+            metadata TEXT,
+            measured_at TEXT NOT NULL
+        );
         """)
         self.conn.commit()
 
@@ -279,6 +320,80 @@ class SSOT:
             "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # === v3.3 Traces ===
+    def log_trace(self, trace_id: str, span_type: str, provider: str = "",
+                  model: str = "", input_tokens: int = 0, output_tokens: int = 0,
+                  latency_ms: int = 0, status: str = "ok",
+                  error_type: str = None, metadata: str = None) -> None:
+        """LLM 호출 / 도구 실행 trace 기록."""
+        self.conn.execute(
+            "INSERT INTO traces(trace_id,span_type,provider,model,"
+            "input_tokens,output_tokens,latency_ms,status,error_type,metadata,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (trace_id, span_type, provider or "", model or "",
+             input_tokens, output_tokens, latency_ms, status,
+             error_type, metadata, self._kst_now())
+        )
+        self.conn.commit()
+
+    def get_provider_stats(self, hours: int = 24) -> list[dict]:
+        """최근 N시간 프로바이더별 통계."""
+        cutoff = (datetime.now(config.KST) - timedelta(hours=hours)).isoformat()
+        rows = self.conn.execute("""
+            SELECT provider,
+                   COUNT(*) as calls,
+                   SUM(input_tokens + output_tokens) as total_tokens,
+                   CAST(AVG(latency_ms) AS INTEGER) as avg_latency,
+                   SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END) as errors
+            FROM traces
+            WHERE span_type = 'llm_call' AND created_at > ?
+            GROUP BY provider
+        """, (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # === v3.3 Plan Cache ===
+    def cache_plan(self, keywords: str, task_pattern: str, plan_json: str) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO plan_cache(keywords, task_pattern, plan_json, last_used, created_at)
+               VALUES(?,?,?,?,?)""",
+            (keywords, task_pattern, plan_json, self._kst_now(), self._kst_now())
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_cached_plan(self, keywords: str) -> Optional[dict]:
+        row = self.conn.execute(
+            """SELECT * FROM plan_cache WHERE keywords=?
+               ORDER BY success_count DESC, last_used DESC LIMIT 1""",
+            (keywords,)
+        ).fetchone()
+        if row:
+            self.conn.execute(
+                "UPDATE plan_cache SET last_used=? WHERE id=?",
+                (self._kst_now(), row["id"])
+            )
+            self.conn.commit()
+            return dict(row)
+        return None
+
+    def update_plan_stats(self, plan_id: int, success: bool) -> None:
+        col = "success_count" if success else "fail_count"
+        self.conn.execute(
+            f"UPDATE plan_cache SET {col} = {col} + 1 WHERE id=?", (plan_id,)
+        )
+        self.conn.commit()
+
+    # === v3.3 Biz Metrics ===
+    def log_biz_metric(self, metric_type: str, metric_name: str,
+                       value: float, unit: str = "", metadata: str = None) -> None:
+        """비즈니스 지표 기록."""
+        self.conn.execute(
+            "INSERT INTO biz_metrics(metric_type,metric_name,value,unit,metadata,measured_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (metric_type, metric_name, value, unit, metadata, self._kst_now())
+        )
+        self.conn.commit()
 
     # === 리소스 관리 ===
     def close(self) -> None:
