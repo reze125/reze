@@ -270,6 +270,57 @@ class GeminiProvider:
 
 
 # ============================================================
+# 5.5 OpenRouterProvider (최후 폴백)
+# ============================================================
+
+class OpenRouterProvider:
+    """OpenRouter API (OpenAI SDK 호환). DeepSeek V3."""
+
+    def __init__(self):
+        self.client = OpenAI(
+            base_url=config.OPENROUTER_BASE_URL,
+            api_key=config.OPENROUTER_API_KEY,
+        )
+        self.model = config.OPENROUTER_MODEL
+        self.name = "openrouter"
+
+    async def call(self, messages: list[dict], system: str = "",
+                   **kwargs) -> LLMResponse:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._call_sync, messages, system, kwargs
+        )
+
+    def _call_sync(self, messages: list[dict], system: str,
+                   kwargs: dict) -> LLMResponse:
+        msgs = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        msgs.extend(messages)
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=msgs,
+                max_tokens=kwargs.get("max_tokens", 2000),
+                temperature=kwargs.get("temperature", 0.3),
+            )
+            text = resp.choices[0].message.content or ""
+            usage = resp.usage
+            return LLMResponse(
+                text=text,
+                input_tokens=usage.prompt_tokens if usage else 0,
+                output_tokens=usage.completion_tokens if usage else 0,
+                total_tokens=usage.total_tokens if usage else 0,
+                model=self.model,
+                provider=self.name,
+            )
+        except Exception as e:
+            logger.error(f"OpenRouter call failed: {e}")
+            raise
+
+
+# ============================================================
 # 6. ModelRouter
 # ============================================================
 
@@ -294,10 +345,11 @@ class ModelRouter:
 
     # 폴백 순서
     FALLBACK_CHAIN = {
-        "cerebras": ["groq", "gemini_flash"],
-        "groq": ["cerebras", "gemini_flash"],
-        "gemini_pro": ["gemini_flash", "groq"],
-        "gemini_flash": ["gemini_pro", "groq"],
+        "cerebras": ["groq", "gemini_flash", "openrouter"],
+        "groq": ["cerebras", "gemini_flash", "openrouter"],
+        "gemini_pro": ["gemini_flash", "groq", "openrouter"],
+        "gemini_flash": ["gemini_pro", "groq", "openrouter"],
+        "openrouter": ["cerebras", "groq", "gemini_flash"],
     }
 
     def __init__(self, ssot: SSOT):
@@ -334,6 +386,13 @@ class ModelRouter:
                 logger.info("Gemini providers initialized (Pro + Flash)")
         except Exception as e:
             logger.warning(f"Gemini init failed: {e}")
+
+        try:
+            if config.OPENROUTER_API_KEY:
+                self.providers["openrouter"] = OpenRouterProvider()
+                logger.info("OpenRouter provider initialized")
+        except Exception as e:
+            logger.warning(f"OpenRouter init failed: {e}")
 
         if not self.providers:
             raise RuntimeError("No LLM providers available!")

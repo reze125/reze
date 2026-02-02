@@ -42,6 +42,11 @@ BLOG_DB = {
 CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 GROQ_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
+
+# OpenRouter (DeepSeek V3 - 최후 폴백)
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "deepseek/deepseek-chat-v3-0324:free"
+
 GEMINI_PRO_MODEL = "gemini-2.5-pro"
 GEMINI_FLASH_MODEL = "gemini-2.5-flash"
 
@@ -66,6 +71,7 @@ PROVIDER_DAILY_LIMITS = {
     "groq": 1_000,         # free tier
     "gemini_pro": 50,      # 5키 × ~10 RPD (Pro는 보수적)
     "gemini_flash": 250,   # 5키 × ~50 RPD
+    "openrouter": 200,     # 보수적 (무료 티어)
 }
 
 # === 보안: 쓰기 허용 경로 ===
