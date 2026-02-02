@@ -18,6 +18,9 @@ from reze_tools import ToolExecutor
 from reze_core import REZECore, ModelRouter, CircuitBreaker
 from skills_manager import SkillsManager
 from redaction import mask_text
+from reze_self_healing import SelfHealing
+from reze_alert import AlertManager
+from reze_biz import BizTracker
 
 import logging
 
@@ -44,6 +47,10 @@ class AppState:
     scheduler: AsyncIOScheduler = None
     notifier: "WebhookNotifier" = None
     queue_worker_task: asyncio.Task = None
+    # v3.3 신규
+    self_healing: SelfHealing = None
+    alert_manager: AlertManager = None
+    biz_tracker: BizTracker = None
 
 state = AppState()
 
@@ -195,6 +202,20 @@ async def health_check_job():
 
             if down_services:
                 logger.warning(f"Services down: {down_services}")
+                # Self-Healing 연동
+                if state.self_healing:
+                    for svc in down_services:
+                        try:
+                            await state.self_healing.handle(svc)
+                        except Exception as e:
+                            logger.error(f"Self-heal error for {svc}: {e}")
+                # Alert 연동
+                if state.alert_manager:
+                    severity = "critical" if len(down_services) >= 3 else "warning"
+                    await state.alert_manager.send(
+                        severity, "health_check",
+                        f"서비스 다운 ({len(down_services)}개): {', '.join(down_services)}"
+                    )
         except Exception as e:
             logger.error(f"SaaS health check failed: {e}")
 
@@ -307,11 +328,28 @@ async def lifespan(app: FastAPI):
     )
     state.notifier = WebhookNotifier()
 
+    # v3.3 신규 모듈
+    state.self_healing = SelfHealing(
+        state.tools, state.ssot, state.router, dry_run=True  # 2주 관찰 후 False
+    )
+    state.alert_manager = AlertManager(state.ssot)
+    state.biz_tracker = BizTracker(state.ssot)  # LS API key는 추후 설정
+
     # 스케줄러
     state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
     state.scheduler.add_job(health_check_job, "interval", hours=1, id="health_check")
     state.scheduler.add_job(judgment_job, "interval", hours=6, id="judgment")
     state.scheduler.add_job(self_review_job, "cron", day_of_week="mon", hour=9, id="self_review")
+
+    # v3.3 신규 스케줄
+    state.scheduler.add_job(
+        state.biz_tracker.collect, "interval", hours=6, id="biz_check"
+    )
+    state.scheduler.add_job(
+        state.alert_manager.generate_daily_report,
+        "cron", hour=6, minute=0, id="daily_report"
+    )
+
     state.scheduler.start()
 
     # 큐 워커
