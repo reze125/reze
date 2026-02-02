@@ -136,6 +136,20 @@ async def queue_worker():
 # ============================================================
 # 스케줄러 Jobs — 능동적 판단
 # ============================================================
+
+# SaaS 헬스체크 대상
+SAAS_HEALTH_ENDPOINTS = {
+    "postpilot-backend": "http://localhost:8000/health",
+    "postpilot-frontend": "http://localhost:3000",
+    "ai-tools-lab": "http://localhost:3005",
+    "browserpilot-api": "http://localhost:8100/health",
+    "agenthub-api": "http://localhost:8101/health",
+    "rag-service": "http://localhost:8020/health",
+    "quotepilot-api": "http://localhost:8030/health",
+    "rapidapi-server": "http://localhost:8001/health",
+    "rapidapi-nocode": "http://localhost:8002/health",
+}
+
 async def health_check_job():
     """매시간: 서버 상태 체크 → 이상 있으면 신호 저장."""
     logger.info("Running health check")
@@ -159,6 +173,30 @@ async def health_check_job():
             source="schedule",
         )
         state.ssot.save_signal("pm2", result)
+
+        # SaaS 개별 헬스체크
+        down_services = []
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for name, url in SAAS_HEALTH_ENDPOINTS.items():
+                    try:
+                        async with session.get(url) as resp:
+                            if resp.status >= 500:
+                                down_services.append(f"{name}(HTTP {resp.status})")
+                    except Exception:
+                        down_services.append(f"{name}(unreachable)")
+
+            state.ssot.save_signal("saas_health", json.dumps({
+                "down": down_services,
+                "total": len(SAAS_HEALTH_ENDPOINTS),
+                "healthy": len(SAAS_HEALTH_ENDPOINTS) - len(down_services),
+            }))
+
+            if down_services:
+                logger.warning(f"Services down: {down_services}")
+        except Exception as e:
+            logger.error(f"SaaS health check failed: {e}")
 
         logger.info("Health check completed")
     except Exception as e:
@@ -440,6 +478,13 @@ async def budget_status(_=Depends(verify_token)):
             "gemini_flash": state.ssot.get_provider_calls("gemini_flash"),
         }
     }
+
+
+@app.get("/traces")
+async def trace_stats(_=Depends(verify_token), hours: int = 24):
+    """프로바이더별 traces 통계."""
+    stats = state.ssot.get_provider_stats(hours=hours)
+    return {"hours": hours, "providers": stats}
 
 
 @app.post("/signal")
