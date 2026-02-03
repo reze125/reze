@@ -206,3 +206,29 @@ def get_tavily_key() -> str:
     key = keys[_tavily_key_index % len(keys)]
     _tavily_key_index += 1
     return key
+
+
+# ============================================================
+# v5.0 SOVEREIGN — Runtime Tunable Settings
+# Phase 4에서 REZE가 자기 판단으로 조정할 수 있는 값들.
+# 지금은 초기값. 근거 없는 값은 주석에 "arbitrary"로 표시.
+# ============================================================
+
+# WorkerPool
+WORKER_MAX_CONCURRENT = 3          # arbitrary. Phase 4에서 CPU 보고 조정
+
+# Planner
+PLANNER_MAX_REPLANS = 2            # arbitrary. Phase 4에서 성공률 보고 조정
+PLANNER_MAX_STEPS = 10             # arbitrary.
+
+# Discovery
+DISCOVERY_INTERVAL_MINUTES = 30    # arbitrary. Phase 4에서 변화 빈도 보고 조정
+
+# Feedback
+FEEDBACK_CHECK_INTERVAL_HOURS = 1  # arbitrary. Phase 4에서 서비스 특성 보고 조정
+
+# Judgment
+JUDGMENT_INTERVAL_HOURS = 6        # arbitrary.
+
+# Task Processing
+TASK_PROCESSOR_INTERVAL_MINUTES = 5  # arbitrary.

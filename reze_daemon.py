@@ -57,6 +57,12 @@ from growth_engine import CrossPortfolioGrowth
 from meta_cognition import MetaCognitionReview
 from prompt_evolver import PromptEvolver
 
+# v5.0 Phase 3 imports
+from feedback_engine import FeedbackEngine
+from worker_pool import WorkerPool
+from config import (WORKER_MAX_CONCURRENT, FEEDBACK_CHECK_INTERVAL_HOURS,
+                    TASK_PROCESSOR_INTERVAL_MINUTES)
+
 import logging
 
 # === 로깅 설정 ===
@@ -104,6 +110,9 @@ class AppState:
     discovery: DiscoveryEngine = None
     planner: UniversalPlanner = None
     plan_executor: PlanExecutor = None
+    # v5.0 Phase 3
+    feedback: FeedbackEngine = None
+    worker_pool: WorkerPool = None
 
 state = AppState()
 
@@ -895,6 +904,102 @@ async def discovery_scan_job():
                 json.dumps([d.get("name", "?") for d in discoveries]))
     except Exception as e:
         logger.error(f"Discovery scan error: {e}")
+
+
+async def assess_task_complexity(task_spec: str, llm_fn) -> str:
+    """LLM이 복잡도 판단. 키워드 매칭 아님."""
+    try:
+        response = await llm_fn(
+            f"""태스크 복잡도를 판단. "simple" 또는 "complex" 한 단어만 출력.
+simple = 명령어 1-2개로 끝남 (재시작, 상태확인, 로그보기)
+complex = 여러 단계 필요 (분석, 구현, 다단계 작업)
+
+태스크: {task_spec}
+
+출력:""",
+            role="judgment"
+        )
+        text = response.strip().lower() if isinstance(response, str) else str(response).strip().lower()
+        return "complex" if "complex" in text else "simple"
+    except:
+        return "complex" if len(task_spec) > 80 else "simple"
+
+
+async def feedback_processor_job():
+    """피드백 큐에서 due된 체크 실행."""
+    try:
+        if not state.feedback:
+            return
+        results = await state.feedback.process_due()
+        if results:
+            logger.info(f"Feedback: {len(results)} checks processed")
+    except Exception as e:
+        logger.error(f"Feedback processor error: {e}")
+
+
+async def daemon_task_processor_job():
+    """daemon_tasks에서 pending 태스크를 WorkerPool로 실행."""
+    try:
+        pending = []
+        for _ in range(3):
+            task = state.ssot.pop_next_pending()
+            if task:
+                pending.append(task)
+            else:
+                break
+
+        if not pending:
+            return
+
+        for task in pending:
+            tid = task["id"]
+            spec = task.get("task_spec", "")
+            src = task.get("source", "schedule")
+
+            async def _run(task_id=tid, task_spec=spec, source=src):
+                try:
+                    # 복잡도 판단 — LLM
+                    complexity = await assess_task_complexity(
+                        task_spec, _call_llm_for_learning
+                    )
+
+                    if complexity == "complex" and state.planner:
+                        plan = await state.planner.plan(task_spec)
+                        result = await state.plan_executor.execute(
+                            plan, task_id=task_id, source=source
+                        )
+                    else:
+                        result = await state.core.run(task_spec, source=source)
+
+                    # 성공/실패 판단
+                    ok = result.get("status") in ("success", "completed")
+                    state.ssot.complete_daemon_task(
+                        task_id,
+                        "success" if ok else "failed",
+                        json.dumps(result, ensure_ascii=False, default=str)[:2000]
+                    )
+
+                    # 피드백 등록 — 실측값
+                    if state.feedback:
+                        state.feedback.register(
+                            task_id=task_id,
+                            task_type=result.get("task_type", "other"),
+                            result=result,
+                            metadata={
+                                "task_spec": task_spec,
+                                "source": source,
+                                "complexity": complexity
+                            }
+                        )
+
+                except Exception as e:
+                    state.ssot.complete_daemon_task(task_id, "failed", str(e)[:500])
+                    logger.error(f"Task {task_id} failed: {e}")
+
+            await state.worker_pool.submit(tid, spec[:50], _run())
+
+    except Exception as e:
+        logger.error(f"Daemon task processor error: {e}")
 
 
 async def keyword_scan_job():
@@ -2245,19 +2350,30 @@ async def lifespan(app: FastAPI):
         tools=state.tools,
         call_llm_fn=_call_llm_for_learning,
     )
+    # v5.0 Phase 3 (init before PlanExecutor so feedback can be passed)
+    state.feedback = FeedbackEngine(ssot=state.ssot, tools=state.tools)
+    state.worker_pool = WorkerPool(ssot=state.ssot)
+
     state.plan_executor = PlanExecutor(
         ssot=state.ssot,
         tools=state.tools,
         planner=state.planner,
         call_llm_fn=_call_llm_for_learning,
+        feedback=state.feedback,  # v5.0 Phase 3
     )
-    logger.info("v5.0 SOVEREIGN: Discovery + Planner initialized")
+    logger.info("v5.0 SOVEREIGN: Discovery + Planner + Feedback + WorkerPool initialized")
 
     # 스케줄러
     state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
     state.scheduler.add_job(health_check_job, "interval", hours=1, id="health_check")
     state.scheduler.add_job(judgment_job, "interval", hours=6, id="judgment")
     state.scheduler.add_job(discovery_scan_job, "interval", minutes=30, id="discovery_scan")  # v5.0
+    state.scheduler.add_job(feedback_processor_job, "interval",
+                            hours=FEEDBACK_CHECK_INTERVAL_HOURS,
+                            id="feedback_processor")  # v5.0 Phase 3
+    state.scheduler.add_job(daemon_task_processor_job, "interval",
+                            minutes=TASK_PROCESSOR_INTERVAL_MINUTES,
+                            id="daemon_task_processor")  # v5.0 Phase 3
     state.scheduler.add_job(self_review_job, "cron", day_of_week="mon", hour=9, id="self_review")
 
     # v3.3 신규 스케줄
@@ -2540,6 +2656,22 @@ async def plan_endpoint(req: RunRequest, _=Depends(verify_token)):
     except Exception as e:
         logger.error(f"/plan error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/worker/status")
+async def worker_status(_=Depends(verify_token)):
+    """v5.0: WorkerPool 상태."""
+    if not state.worker_pool:
+        raise HTTPException(status_code=503, detail="WorkerPool not initialized")
+    return state.worker_pool.status()
+
+
+@app.get("/feedback/stats")
+async def feedback_stats(_=Depends(verify_token)):
+    """v5.0: Feedback 통계."""
+    if not state.feedback:
+        raise HTTPException(status_code=503, detail="FeedbackEngine not initialized")
+    return state.feedback.summary(days=30)
 
 
 @app.get("/tasks")

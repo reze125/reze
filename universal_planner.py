@@ -147,11 +147,12 @@ class UniversalPlanner:
 class TaskExecutor:
     """계획의 각 단계를 도구로 실행."""
 
-    def __init__(self, ssot, tools, planner, call_llm_fn):
+    def __init__(self, ssot, tools, planner, call_llm_fn, feedback=None):
         self.ssot = ssot
         self.tools = tools
         self.planner = planner
         self.llm = call_llm_fn
+        self.feedback = feedback  # v5.0 Phase 3
 
     async def execute(self, plan, task_id=None, source="planner"):
         """계획 실행."""

@@ -553,7 +553,31 @@ class SSOT:
             completed_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_execution_plans_status ON execution_plans(status);
+
+        -- v5.0 Phase 3: Feedback Queue
+        CREATE TABLE IF NOT EXISTS feedback_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            task_type TEXT DEFAULT 'other',
+            phase TEXT NOT NULL,
+            check_after TEXT NOT NULL,
+            check_method TEXT,
+            check_input TEXT,
+            status TEXT DEFAULT 'pending',
+            score REAL,
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now')),
+            checked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_queue(status);
+        CREATE INDEX IF NOT EXISTS idx_feedback_check ON feedback_queue(check_after);
         """)
+        self.conn.commit()
+
+        # v5.0 마이그레이션: 하드코딩 0.8 제거
+        self.conn.execute(
+            "UPDATE plan_cache_v4 SET score = NULL WHERE score = 0.8"
+        )
         self.conn.commit()
 
     # === 유틸리티 ===
@@ -1037,8 +1061,9 @@ class SSOT:
     # === v4.0 plan_cache 메서드 ===
 
     def cache_plan_v4(self, task_pattern: str, skills_used: list,
-                      procedure: str, steps: int, tokens: int, score: float):
-        """성공한 태스크의 절차를 캐싱 (v4.0)."""
+                      procedure: str, steps: int, tokens: int,
+                      score: float = None):
+        """성공한 태스크의 절차를 캐싱. score는 실측값만 저장 (None=미검증)."""
         import json
         self.conn.execute("""
             INSERT INTO plan_cache_v4 (task_pattern, skills_used, procedure,
@@ -1047,14 +1072,20 @@ class SSOT:
         """, [task_pattern, json.dumps(skills_used), procedure, steps, tokens, score])
         self.conn.commit()
 
-    def find_cached_plan_v4(self, task: str, threshold: float = 0.6) -> Optional[dict]:
-        """유사 태스크의 캐싱된 절차 검색 (v4.0)."""
+    def find_cached_plan_v4(self, task: str, threshold: float = 0.0) -> Optional[dict]:
+        """유사 태스크의 캐싱된 절차 검색.
+
+        score=NULL → 아직 미검증. 한번 써볼 가치는 있음.
+        score<0.3 → 실패한 계획. 제외.
+        """
         plans = self.conn.execute("""
             SELECT task_pattern, procedure, score, used_count
             FROM plan_cache_v4
             WHERE created_at > datetime('now', '-30 days')
-            AND score >= ?
-            ORDER BY score DESC, used_count DESC
+            AND (score IS NULL OR score >= ?)
+            ORDER BY
+                CASE WHEN score IS NULL THEN 0.5 ELSE score END DESC,
+                used_count DESC
             LIMIT 5
         """, [threshold]).fetchall()
         if not plans:
@@ -1062,7 +1093,7 @@ class SSOT:
         return {
             'task_pattern': plans[0][0],
             'procedure': plans[0][1],
-            'score': plans[0][2],
+            'score': plans[0][2],  # None일 수 있음 = 미검증
             'used_count': plans[0][3]
         }
 
@@ -1073,6 +1104,18 @@ class SSOT:
             last_used = datetime('now')
             WHERE task_pattern = ?
         """, [task_pattern])
+        self.conn.commit()
+
+    def update_plan_score(self, task_pattern: str, measured_score: float):
+        """plan_cache_v4 점수를 실측값으로 직접 교체.
+
+        EMA 아님. 가장 최근 실측값이 진실.
+        히스토리가 필요하면 feedback_queue에서 조회.
+        """
+        self.conn.execute("""
+            UPDATE plan_cache_v4 SET score = ?
+            WHERE task_pattern LIKE ?
+        """, (measured_score, f"%{task_pattern[:50]}%"))
         self.conn.commit()
 
     # === v4.0 reflections 메서드 ===
@@ -1621,7 +1664,7 @@ class SSOT:
     # === find_similar_plans (plan_cache_v4 활용) ===
 
     def find_similar_plans(self, task: str, top_k: int = 3) -> list:
-        """plan_cache_v4에서 유사 계획 검색 (키워드)."""
+        """plan_cache_v4에서 유사 계획 검색 (키워드). NULL=미검증도 포함."""
         words = task.lower().split()[:5]
         results = []
         seen = set()
@@ -1629,7 +1672,10 @@ class SSOT:
             if len(word) < 3:
                 continue
             rows = self.conn.execute(
-                "SELECT * FROM plan_cache_v4 WHERE task_pattern LIKE ? AND score > 0.5 ORDER BY score DESC LIMIT ?",
+                """SELECT * FROM plan_cache_v4
+                   WHERE task_pattern LIKE ? AND (score IS NULL OR score >= 0.3)
+                   ORDER BY CASE WHEN score IS NULL THEN 0.5 ELSE score END DESC
+                   LIMIT ?""",
                 (f"%{word}%", top_k)).fetchall()
             for r in rows:
                 d = dict(r)
@@ -1646,6 +1692,47 @@ class SSOT:
             "INSERT INTO daemon_tasks (id, task_spec, source, priority, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
             (self._new_id("dtask"), title, source, priority, self._kst_now()))
         self.conn.commit()
+
+    # ========== v5.0 Phase 3: feedback_queue 메서드 ==========
+
+    def enqueue_feedback(self, task_id, task_type, phase, check_after,
+                         check_method="", check_input="", metadata=None):
+        """피드백 체크 큐에 등록."""
+        import json as _json
+        self.conn.execute("""
+            INSERT INTO feedback_queue (task_id, task_type, phase, check_after,
+                check_method, check_input, metadata) VALUES (?,?,?,?,?,?,?)
+        """, (task_id, task_type, phase, check_after,
+              check_method, check_input, _json.dumps(metadata or {})))
+        self.conn.commit()
+
+    def get_due_feedback(self):
+        """due된 피드백 체크 조회."""
+        rows = self.conn.execute("""
+            SELECT * FROM feedback_queue
+            WHERE status='pending' AND check_after <= datetime('now')
+            ORDER BY check_after LIMIT 10
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_feedback(self, fid, score):
+        """피드백 체크 완료."""
+        self.conn.execute("""
+            UPDATE feedback_queue SET status='checked', score=?, checked_at=datetime('now')
+            WHERE id=?
+        """, (score, fid))
+        self.conn.commit()
+
+    def get_feedback_stats(self, days=30):
+        """피드백 통계."""
+        rows = self.conn.execute("""
+            SELECT task_type, COUNT(*) as total, AVG(score) as avg_score,
+                SUM(CASE WHEN score >= 0.8 THEN 1 ELSE 0 END) as good,
+                SUM(CASE WHEN score < 0.3 THEN 1 ELSE 0 END) as bad
+            FROM feedback_queue WHERE status='checked' AND checked_at > datetime('now', ?)
+            GROUP BY task_type
+        """, (f"-{days} days",)).fetchall()
+        return [dict(r) for r in rows]
 
     # === 리소스 관리 ===
     def close(self) -> None:
