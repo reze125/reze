@@ -1,0 +1,124 @@
+# REZE ADDON 설정
+reze:
+  home: /home/reze/reze-agent
+  ssot_db: /home/reze/reze-agent/reze.db
+  addon_db: /home/reze/reze-agent/addon/data/addon.db
+
+llm:
+  groq_model: llama-3.3-70b-versatile
+  groq_fast_model: llama-3.1-8b-instant
+  max_tokens: 4096
+  temperature: 0.3
+
+qdrant:
+  host: localhost
+  port: 6333
+  collection: reze_archival_memory
+
+memory_tier:
+  enabled: true
+  core_memory_max_tokens: 2000
+  archival_search_top_k: 5
+  consolidation_cron: "0 3 * * *"
+  heartbeat_interval: 30
+  core_blocks:
+    - name: current_goals
+      description: "현재 진행 중인 목표와 우선순위"
+      max_tokens: 400
+    - name: active_issues
+      description: "해결 필요한 문제/장애 목록"
+      max_tokens: 300
+    - name: service_summary
+      description: "19 Docker + 10 블로그 + 5 SaaS 현황 요약"
+      max_tokens: 500
+    - name: boss_context
+      description: "보스 최근 지시사항/선호/피드백"
+      max_tokens: 400
+    - name: recent_learnings
+      description: "최근 72시간 학습/반성 요약"
+      max_tokens: 400
+
+dspy_optimizer:
+  enabled: true
+  optimize_cron: "0 4 * * 0"
+  cache_dir: /home/reze/reze-agent/addon/dspy_cache
+  max_bootstrapped_demos: 4
+  max_labeled_demos: 8
+  target_modules:
+    - name: blog_article_gen
+      signature: "topic, competitors, keywords, style_guide -> article"
+      metric: boss_feedback_score
+    - name: saas_analysis
+      signature: "service_data, metrics, competitors -> analysis_report"
+      metric: actionability_score
+    - name: task_decomposition
+      signature: "goal, constraints, current_state -> subtasks"
+      metric: completion_rate
+    - name: competitor_research
+      signature: "service, market_data -> insights, opportunities"
+      metric: insight_usefulness
+
+self_modifier:
+  enabled: true
+  check_cron: "0 2 * * 1,4"
+  archive_dir: /home/reze/reze-agent/addon/archive
+  max_daily_modifications: 3
+  sandbox_timeout: 60
+  modifiable_files:
+    - "skills/*.py"
+    - "prompts/*.yaml"
+    - "configs/services.yaml"
+  protected_files:
+    - "autonomous_ops.py"
+    - "reze_daemon.py"
+    - "ssot.py"
+    - "reze_core.py"
+    - "addon_daemon.py"
+  utility_weights:
+    quality: 0.5
+    cost: 0.3
+    speed: 0.2
+
+tool_discovery:
+  enabled: true
+  scan_cron: "0 */12 * * *"
+  registry_dir: /home/reze/reze-agent/addon/tool_registry
+  max_tools_per_scan: 5
+  verification_attempts: 3
+  scan_targets:
+    - type: docker
+      command: "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Ports}}'"
+    - type: pm2
+      command: "pm2 jlist"
+    - type: cron
+      command: "crontab -l"
+
+curiosity_engine:
+  enabled: true
+  check_cron: "0 */6 * * *"
+  max_explorations_per_day: 5
+  curiosity_categories:
+    - name: traffic_anomaly
+      question_template: "블로그 {blog}에서 트래픽 변동이 있었다면 원인은?"
+    - name: competitor_change
+      question_template: "{service}의 경쟁사들이 최근 변경한 것은?"
+    - name: user_behavior
+      question_template: "{saas}에서 사용자들이 가장 많이/적게 쓰는 기능은?"
+    - name: cost_optimization
+      question_template: "현재 인프라 비용을 줄일 수 있는 방법은?"
+    - name: new_opportunity
+      question_template: "현재 포트폴리오에 추가할 만한 새로운 수익원은?"
+
+daemon:
+  log_level: INFO
+  schedule:
+    - module: memory_tier.consolidate
+      cron: "0 3 * * *"
+    - module: self_modifier.check_and_evolve
+      cron: "0 2 * * 1,4"
+    - module: dspy_optimizer.optimize_all
+      cron: "0 4 * * 0"
+    - module: tool_discovery.scan_and_discover
+      cron: "0 */12 * * *"
+    - module: curiosity_engine.explore
+      cron: "0 */6 * * *"

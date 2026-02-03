@@ -374,6 +374,139 @@ class SSOT:
             completed_at TEXT,
             FOREIGN KEY (goal_id) REFERENCES goal_tree(id)
         );
+
+        -- ========== v4.0 ULTIMATE 신규 테이블 ==========
+
+        -- 1) 태스크 큐 (Goal → Auto-Execute)
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            target_service TEXT NOT NULL,
+            action TEXT NOT NULL,
+            parameters TEXT,
+            parent_goal TEXT,
+            sub_goal TEXT,
+            priority INTEGER DEFAULT 50,
+            frequency TEXT DEFAULT 'once',
+            status TEXT DEFAULT 'pending',
+            retry_count INTEGER DEFAULT 0,
+            max_retries INTEGER DEFAULT 3,
+            result TEXT,
+            created_at TEXT NOT NULL,
+            next_run TEXT,
+            completed_at TEXT,
+            error_log TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_queue_status ON task_queue(status, priority DESC);
+        CREATE INDEX IF NOT EXISTS idx_task_queue_next_run ON task_queue(next_run);
+
+        -- 2) 보스 피드백 (Quality Gate 캘리브레이션)
+        CREATE TABLE IF NOT EXISTS boss_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            result_type TEXT NOT NULL,
+            llm_score REAL NOT NULL,
+            boss_score REAL,
+            boss_comment TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_boss_feedback_type ON boss_feedback(result_type, created_at);
+
+        -- 3) 감시 대상 에이전트
+        CREATE TABLE IF NOT EXISTS supervised_agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            agent_type TEXT NOT NULL,
+            container_name TEXT,
+            workflow_id TEXT,
+            process_name TEXT,
+            cron_pattern TEXT,
+            health_url TEXT,
+            auto_recover INTEGER DEFAULT 1,
+            enabled INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'unknown',
+            last_check TEXT,
+            last_healthy TEXT,
+            restart_count_24h INTEGER DEFAULT 0,
+            skill_ref TEXT,
+            purpose TEXT,
+            dependencies TEXT,
+            discovered_at TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_supervised_agents_status ON supervised_agents(status, enabled);
+
+        -- 4) 동적 스킬 상태 (enhanced)
+        CREATE TABLE IF NOT EXISTS dynamic_skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name TEXT UNIQUE NOT NULL,
+            skill_path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT DEFAULT 'draft',
+            success_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            consecutive_successes INTEGER DEFAULT 0,
+            last_used TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            verified_at TEXT,
+            metadata TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dynamic_skills_status ON dynamic_skills(status);
+
+        -- 5) 에이전트 재시작 로그
+        CREATE TABLE IF NOT EXISTS agent_restarts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            error TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (agent_id) REFERENCES supervised_agents(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_restarts_agent ON agent_restarts(agent_id, created_at);
+
+        -- 6) 메타인지 리뷰 기록
+        CREATE TABLE IF NOT EXISTS meta_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT NOT NULL,
+            capability_scores TEXT NOT NULL,
+            service_scores TEXT NOT NULL,
+            strengths TEXT,
+            weaknesses TEXT,
+            focus_areas TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- 7) 포트폴리오 수익 스냅샷
+        CREATE TABLE IF NOT EXISTS revenue_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            blogs_revenue REAL DEFAULT 0,
+            saas_revenue REAL DEFAULT 0,
+            gumroad_revenue REAL DEFAULT 0,
+            total_revenue REAL DEFAULT 0,
+            goal_progress REAL DEFAULT 0,
+            breakdown TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_revenue_snapshots_date ON revenue_snapshots(date);
+
+        -- 8) A/B 테스트 (프롬프트 진화용)
+        CREATE TABLE IF NOT EXISTS ab_tests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name TEXT NOT NULL,
+            variant_a TEXT NOT NULL,
+            variant_b TEXT NOT NULL,
+            variant_a_score REAL,
+            variant_b_score REAL,
+            variant_a_count INTEGER DEFAULT 0,
+            variant_b_count INTEGER DEFAULT 0,
+            winner TEXT,
+            status TEXT DEFAULT 'running',
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ab_tests_status ON ab_tests(status);
         """)
         self.conn.commit()
 
@@ -965,6 +1098,403 @@ class SSOT:
         import json
         data_str = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)
         return self.save_signal(type_, data_str)
+
+    # ========== v4.0 ULTIMATE 헬퍼 메서드 ==========
+
+    # === task_queue (Goal → Auto-Execute) ===
+
+    def enqueue_task(self, task_type: str, target_service: str, action: str,
+                     parameters: dict = None, parent_goal: str = None,
+                     sub_goal: str = None, priority: int = 50,
+                     frequency: str = "once", next_run: str = None) -> int:
+        """태스크 큐에 작업 등록."""
+        import json
+        cur = self.conn.execute("""
+            INSERT INTO task_queue (task_type, target_service, action, parameters,
+                                   parent_goal, sub_goal, priority, frequency,
+                                   status, created_at, next_run)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """, [task_type, target_service, action,
+              json.dumps(parameters or {}), parent_goal, sub_goal,
+              priority, frequency, self._kst_now(), next_run or self._kst_now()])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_pending_tasks_queue(self, limit: int = 10) -> list:
+        """우선순위 순으로 대기 태스크 조회."""
+        rows = self.conn.execute("""
+            SELECT * FROM task_queue
+            WHERE status = 'pending' AND (next_run IS NULL OR next_run <= ?)
+            ORDER BY priority DESC, created_at ASC
+            LIMIT ?
+        """, [self._kst_now(), limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_task_queue_status(self, task_id: int, status: str,
+                                  result: str = None, error_log: str = None):
+        """태스크 큐 상태 업데이트."""
+        import json
+        if status == 'done':
+            self.conn.execute("""
+                UPDATE task_queue SET status=?, result=?, completed_at=?
+                WHERE id=?
+            """, [status, json.dumps(result) if result else None,
+                  self._kst_now(), task_id])
+        elif status == 'failed':
+            self.conn.execute("""
+                UPDATE task_queue SET status=?, error_log=?, retry_count=retry_count+1
+                WHERE id=?
+            """, [status, error_log, task_id])
+        else:
+            self.conn.execute("UPDATE task_queue SET status=? WHERE id=?",
+                             [status, task_id])
+        self.conn.commit()
+
+    def get_goal_tasks_from_queue(self, parent_goal: str) -> list:
+        """특정 목표의 모든 태스크 조회."""
+        rows = self.conn.execute("""
+            SELECT * FROM task_queue WHERE parent_goal=?
+            ORDER BY priority DESC, created_at ASC
+        """, [parent_goal]).fetchall()
+        return [dict(r) for r in rows]
+
+    def pop_next_task(self) -> dict:
+        """다음 실행할 태스크를 가져오고 running 상태로 변경."""
+        row = self.conn.execute("""
+            SELECT * FROM task_queue
+            WHERE status = 'pending' AND (next_run IS NULL OR next_run <= ?)
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1
+        """, [self._kst_now()]).fetchone()
+
+        if not row:
+            return None
+
+        task = dict(row)
+        self.conn.execute("""
+            UPDATE task_queue SET status='running', started_at=?
+            WHERE id=?
+        """, [self._kst_now(), task['id']])
+        self.conn.commit()
+        return task
+
+    def complete_task_queue_item(self, task_id: int, status: str, result: str = None):
+        """태스크 큐 아이템 완료 처리."""
+        import json
+        if status == 'done':
+            self.conn.execute("""
+                UPDATE task_queue SET status=?, result=?, completed_at=?
+                WHERE id=?
+            """, [status, result, self._kst_now(), task_id])
+        else:
+            self.conn.execute("""
+                UPDATE task_queue SET status=?, error_log=?, retry_count=retry_count+1
+                WHERE id=?
+            """, [status, result, task_id])
+        self.conn.commit()
+
+    # === boss_feedback (Quality Gate 캘리브레이션) ===
+
+    def save_boss_feedback(self, task_id: str, result_type: str,
+                           llm_score: float, boss_score: float = None,
+                           boss_comment: str = None) -> int:
+        """보스 피드백 저장."""
+        cur = self.conn.execute("""
+            INSERT INTO boss_feedback (task_id, result_type, llm_score,
+                                       boss_score, boss_comment, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [task_id, result_type, llm_score, boss_score,
+              boss_comment, self._kst_now()])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_calibration_offset(self, result_type: str, limit: int = 10) -> float:
+        """보스 피드백 기반 점수 보정값 계산."""
+        rows = self.conn.execute("""
+            SELECT llm_score, boss_score FROM boss_feedback
+            WHERE result_type=? AND boss_score IS NOT NULL
+            ORDER BY created_at DESC LIMIT ?
+        """, [result_type, limit]).fetchall()
+        if not rows:
+            return 0.0
+        avg_llm = sum(r[0] for r in rows) / len(rows)
+        avg_boss = sum(r[1] for r in rows) / len(rows)
+        return avg_boss - avg_llm
+
+    # === supervised_agents (에이전트 감시) ===
+
+    def register_agent(self, name: str, agent_type: str, **kwargs) -> int:
+        """새 에이전트 등록."""
+        import json
+        cols = ['name', 'agent_type']
+        vals = [name, agent_type]
+        for key in ['container_name', 'workflow_id', 'process_name', 'cron_pattern',
+                    'health_url', 'auto_recover', 'enabled', 'status', 'skill_ref',
+                    'purpose', 'dependencies', 'discovered_at']:
+            if key in kwargs:
+                cols.append(key)
+                val = kwargs[key]
+                if key == 'dependencies' and isinstance(val, (list, dict)):
+                    val = json.dumps(val)
+                vals.append(val)
+
+        placeholders = ','.join(['?'] * len(vals))
+        col_str = ','.join(cols)
+        cur = self.conn.execute(
+            f"INSERT OR REPLACE INTO supervised_agents ({col_str}) VALUES ({placeholders})",
+            vals
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_all_agents(self, enabled_only: bool = True) -> list:
+        """모든 감시 대상 에이전트 조회."""
+        if enabled_only:
+            rows = self.conn.execute(
+                "SELECT * FROM supervised_agents WHERE enabled=1"
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM supervised_agents").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_known_agent_names(self, agent_type: str) -> list:
+        """특정 타입의 알려진 에이전트 이름 목록."""
+        rows = self.conn.execute(
+            "SELECT name FROM supervised_agents WHERE agent_type=?",
+            [agent_type]
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def update_agent_status(self, agent_id: int, status: str, details: dict = None):
+        """에이전트 상태 업데이트."""
+        now = self._kst_now()
+        if status == 'healthy':
+            self.conn.execute("""
+                UPDATE supervised_agents SET status=?, last_check=?, last_healthy=?
+                WHERE id=?
+            """, [status, now, now, agent_id])
+        else:
+            self.conn.execute("""
+                UPDATE supervised_agents SET status=?, last_check=? WHERE id=?
+            """, [status, now, agent_id])
+        self.conn.commit()
+
+    def count_recent_restarts(self, agent_id: int, hours: int = 24) -> int:
+        """최근 N시간 내 재시작 횟수."""
+        row = self.conn.execute("""
+            SELECT COUNT(*) FROM agent_restarts
+            WHERE agent_id=? AND created_at > datetime('now', ?)
+        """, [agent_id, f'-{hours} hours']).fetchone()
+        return row[0] if row else 0
+
+    def log_restart(self, agent_id: int, command: str, success: bool,
+                    error: str = None) -> int:
+        """에이전트 재시작 로그."""
+        cur = self.conn.execute("""
+            INSERT INTO agent_restarts (agent_id, command, success, error)
+            VALUES (?, ?, ?, ?)
+        """, [agent_id, command, 1 if success else 0, error])
+        self.conn.commit()
+        return cur.lastrowid
+
+    # === dynamic_skills (동적 스킬 상태) ===
+
+    def register_dynamic_skill(self, skill_name: str, skill_path: str,
+                                source: str, metadata: dict = None) -> int:
+        """동적 스킬 등록."""
+        import json
+        cur = self.conn.execute("""
+            INSERT OR IGNORE INTO dynamic_skills
+            (skill_name, skill_path, source, status, metadata)
+            VALUES (?, ?, ?, 'unverified', ?)
+        """, [skill_name, skill_path, source, json.dumps(metadata or {})])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def increment_skill_success(self, skill_name: str) -> int:
+        """스킬 성공 카운트 증가, 연속 성공 수 반환."""
+        self.conn.execute("""
+            UPDATE dynamic_skills SET
+                success_count = success_count + 1,
+                consecutive_successes = consecutive_successes + 1,
+                last_used = datetime('now')
+            WHERE skill_name=?
+        """, [skill_name])
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT consecutive_successes FROM dynamic_skills WHERE skill_name=?",
+            [skill_name]
+        ).fetchone()
+        return row[0] if row else 0
+
+    def reset_skill_success(self, skill_name: str):
+        """스킬 연속 성공 리셋 (실패 시)."""
+        self.conn.execute("""
+            UPDATE dynamic_skills SET
+                failure_count = failure_count + 1,
+                consecutive_successes = 0,
+                last_used = datetime('now')
+            WHERE skill_name=?
+        """, [skill_name])
+        self.conn.commit()
+
+    def update_skill_status(self, skill_name: str, status: str):
+        """스킬 상태 업데이트."""
+        now = self._kst_now()
+        if status == 'verified':
+            self.conn.execute("""
+                UPDATE dynamic_skills SET status=?, verified_at=? WHERE skill_name=?
+            """, [status, now, skill_name])
+        else:
+            self.conn.execute(
+                "UPDATE dynamic_skills SET status=? WHERE skill_name=?",
+                [status, skill_name]
+            )
+        self.conn.commit()
+
+    def get_skill_status(self, skill_name: str) -> Optional[dict]:
+        """스킬 상태 조회."""
+        row = self.conn.execute(
+            "SELECT * FROM dynamic_skills WHERE skill_name=?", [skill_name]
+        ).fetchone()
+        return dict(row) if row else None
+
+    # === meta_reviews (메타인지 리뷰) ===
+
+    def save_meta_review(self, week_start: str, capability_scores: dict,
+                         service_scores: dict, strengths: list = None,
+                         weaknesses: list = None, focus_areas: list = None) -> int:
+        """메타인지 리뷰 저장."""
+        import json
+        cur = self.conn.execute("""
+            INSERT INTO meta_reviews (week_start, capability_scores, service_scores,
+                                      strengths, weaknesses, focus_areas)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [week_start, json.dumps(capability_scores), json.dumps(service_scores),
+              json.dumps(strengths or []), json.dumps(weaknesses or []),
+              json.dumps(focus_areas or [])])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_latest_meta_review(self) -> Optional[dict]:
+        """최신 메타인지 리뷰 조회."""
+        row = self.conn.execute("""
+            SELECT * FROM meta_reviews ORDER BY created_at DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+
+    # === revenue_snapshots (수익 스냅샷) ===
+
+    def save_revenue_snapshot(self, blogs_revenue: float = 0, saas_revenue: float = 0,
+                               gumroad_revenue: float = 0, goal_progress: float = 0,
+                               breakdown: dict = None) -> int:
+        """수익 스냅샷 저장."""
+        import json
+        total = blogs_revenue + saas_revenue + gumroad_revenue
+        cur = self.conn.execute("""
+            INSERT INTO revenue_snapshots (date, blogs_revenue, saas_revenue,
+                                          gumroad_revenue, total_revenue,
+                                          goal_progress, breakdown)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [self._kst_date(), blogs_revenue, saas_revenue, gumroad_revenue,
+              total, goal_progress, json.dumps(breakdown or {})])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_revenue_history(self, days: int = 30) -> list:
+        """최근 수익 히스토리."""
+        rows = self.conn.execute("""
+            SELECT * FROM revenue_snapshots
+            WHERE date > date('now', ?)
+            ORDER BY date DESC
+        """, [f'-{days} days']).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_latest_revenue(self) -> Optional[dict]:
+        """최신 수익 스냅샷."""
+        row = self.conn.execute("""
+            SELECT * FROM revenue_snapshots ORDER BY date DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+
+    # === ab_tests (A/B 테스트) ===
+
+    def register_ab_test(self, skill_name: str, variant_a: str,
+                          variant_b: str) -> int:
+        """A/B 테스트 등록."""
+        cur = self.conn.execute("""
+            INSERT INTO ab_tests (skill_name, variant_a, variant_b, status)
+            VALUES (?, ?, ?, 'running')
+        """, [skill_name, variant_a, variant_b])
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_ab_test_score(self, test_id: int, variant: str, score: float):
+        """A/B 테스트 점수 업데이트."""
+        if variant == 'a':
+            self.conn.execute("""
+                UPDATE ab_tests SET
+                    variant_a_score = COALESCE((variant_a_score * variant_a_count + ?) / (variant_a_count + 1), ?),
+                    variant_a_count = variant_a_count + 1
+                WHERE id=?
+            """, [score, score, test_id])
+        else:
+            self.conn.execute("""
+                UPDATE ab_tests SET
+                    variant_b_score = COALESCE((variant_b_score * variant_b_count + ?) / (variant_b_count + 1), ?),
+                    variant_b_count = variant_b_count + 1
+                WHERE id=?
+            """, [score, score, test_id])
+        self.conn.commit()
+
+    def complete_ab_test(self, test_id: int):
+        """A/B 테스트 완료 + 승자 결정."""
+        row = self.conn.execute(
+            "SELECT variant_a_score, variant_b_score FROM ab_tests WHERE id=?",
+            [test_id]
+        ).fetchone()
+        if row:
+            winner = 'a' if (row[0] or 0) >= (row[1] or 0) else 'b'
+            self.conn.execute("""
+                UPDATE ab_tests SET status='completed', winner=?, completed_at=?
+                WHERE id=?
+            """, [winner, self._kst_now(), test_id])
+            self.conn.commit()
+
+    def get_running_ab_tests(self) -> list:
+        """실행 중인 A/B 테스트 목록."""
+        rows = self.conn.execute(
+            "SELECT * FROM ab_tests WHERE status='running'"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # === 추가 유틸리티 ===
+
+    def get_capability_results(self, capability: str, days: int = 7) -> list:
+        """역량별 최근 결과 조회 (plan_cache_v4에서)."""
+        rows = self.conn.execute("""
+            SELECT * FROM plan_cache_v4
+            WHERE skills_used LIKE ? AND created_at > datetime('now', ?)
+            ORDER BY created_at DESC
+        """, [f'%{capability}%', f'-{days} days']).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_service_results(self, service_name: str, days: int = 7) -> list:
+        """서비스별 최근 결과 조회."""
+        rows = self.conn.execute("""
+            SELECT * FROM task_queue
+            WHERE target_service=? AND created_at > datetime('now', ?)
+            ORDER BY created_at DESC
+        """, [service_name, f'-{days} days']).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_similar_successes(self, target_type: str, action: str) -> int:
+        """유사 성공 태스크 수."""
+        row = self.conn.execute("""
+            SELECT COUNT(*) FROM task_queue
+            WHERE task_type=? AND action=? AND status='done'
+        """, [target_type, action]).fetchone()
+        return row[0] if row else 0
 
     # === 리소스 관리 ===
     def close(self) -> None:

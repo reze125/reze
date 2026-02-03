@@ -44,6 +44,17 @@ from feature_prioritizer import (
 from landing_optimizer import LandingOptimizer
 from launch_sequence import LaunchSequence
 
+# v4.0 ULTIMATE imports
+from capability_engine import CapabilityEngine
+from autonomous_ops import AutonomousLoop
+from goal_execution_bridge import GoalExecutionBridge
+from agent_supervisor import AgentSupervisor
+from saas_operations import SaaSOperations
+from gumroad_operations import GumroadOperations
+from growth_engine import CrossPortfolioGrowth
+from meta_cognition import MetaCognitionReview
+from prompt_evolver import PromptEvolver
+
 import logging
 
 # === 로깅 설정 ===
@@ -77,6 +88,16 @@ class AppState:
     saas_monitor: SaaSMonitor = None
     landing_optimizer: LandingOptimizer = None
     launch_sequence: LaunchSequence = None
+    # v4.0 ULTIMATE
+    capability_engine: CapabilityEngine = None
+    autonomous_loop: AutonomousLoop = None
+    goal_bridge: GoalExecutionBridge = None
+    agent_supervisor: AgentSupervisor = None
+    saas_ops: SaaSOperations = None
+    gumroad_ops: GumroadOperations = None
+    growth_engine: CrossPortfolioGrowth = None
+    meta_cognition: MetaCognitionReview = None
+    prompt_evolver: PromptEvolver = None
 
 state = AppState()
 
@@ -1775,12 +1796,295 @@ async def weekly_goal_review_job():
 
 
 # ============================================================
+# v4.0 ULTIMATE Jobs
+# ============================================================
+
+async def _discord_notify_fn(message: str):
+    """Discord 알림 헬퍼."""
+    if state.alert_manager:
+        await state.alert_manager.send("info", "reze_ultimate", message)
+
+
+async def _tavily_search_fn(query: str) -> list:
+    """Tavily 검색 헬퍼."""
+    try:
+        import os
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", ""))
+        result = client.search(query, max_results=5)
+        return result.get("results", [])
+    except Exception as e:
+        logger.warning(f"Tavily search failed: {e}")
+        return []
+
+
+async def autonomous_loop_job():
+    """6시간마다: 자율 운영 루프 실행 (SENSE→SEARCH→THINK→ACT→VERIFY→LEARN)."""
+    logger.info("=== Running Autonomous Loop ===")
+    try:
+        if state.autonomous_loop:
+            result = await state.autonomous_loop.run_cycle()
+            logger.info(f"Autonomous loop completed: {result.get('targets_processed', 0)} targets processed")
+
+            if state.alert_manager and result.get("targets_processed", 0) > 0:
+                await state.alert_manager.send(
+                    "info", "autonomous_loop",
+                    f"🔄 자율 루프 완료: {result.get('targets_processed')}개 서비스 처리, "
+                    f"액션 {result.get('actions_taken', 0)}개 실행"
+                )
+    except Exception as e:
+        logger.error(f"Autonomous loop failed: {e}")
+
+
+async def agent_supervisor_scan_job():
+    """30분마다: Docker/n8n/PM2/cron/Dify 에이전트 감시."""
+    logger.info("Running agent supervisor scan")
+    try:
+        if state.agent_supervisor:
+            result = await state.agent_supervisor.run_health_check()
+
+            # 문제 있으면 자동 복구 시도
+            unhealthy = [a for a in result.get("agents", []) if a.get("status") != "healthy"]
+            if unhealthy:
+                for agent in unhealthy[:3]:  # 최대 3개 동시 복구
+                    try:
+                        recovery = await state.agent_supervisor.recover_agent(agent["name"])
+                        if recovery.get("success"):
+                            logger.info(f"Agent recovered: {agent['name']}")
+                        else:
+                            logger.warning(f"Agent recovery failed: {agent['name']}")
+                    except Exception as e:
+                        logger.error(f"Agent recovery error: {agent['name']} - {e}")
+
+                # Alert
+                if state.alert_manager:
+                    await state.alert_manager.send(
+                        "warning", "agent_supervisor",
+                        f"⚠️ 에이전트 이상 감지: {', '.join(a['name'] for a in unhealthy[:5])}"
+                    )
+    except Exception as e:
+        logger.error(f"Agent supervisor scan failed: {e}")
+
+
+async def agent_discovery_job():
+    """12시간마다: 새 에이전트 자동 발견 및 등록."""
+    logger.info("Running agent discovery")
+    try:
+        if state.agent_supervisor:
+            discovered = await state.agent_supervisor.discover_agents()
+
+            if discovered:
+                logger.info(f"Discovered {len(discovered)} new agents")
+                if state.alert_manager:
+                    await state.alert_manager.send(
+                        "info", "agent_discovery",
+                        f"🔍 새 에이전트 발견: {', '.join(a['name'] for a in discovered[:5])}"
+                    )
+    except Exception as e:
+        logger.error(f"Agent discovery failed: {e}")
+
+
+async def goal_progress_job():
+    """매일 21:00: 목표 진행 상황 체크 및 리포트."""
+    logger.info("Running goal progress check")
+    try:
+        if state.goal_bridge:
+            progress = await state.goal_bridge.check_all_progress()
+
+            if progress.get("goals"):
+                report_lines = ["📋 일일 목표 진행 현황"]
+                for goal in progress["goals"][:5]:
+                    report_lines.append(
+                        f"  • {goal['goal'][:40]}: {goal['progress']}% "
+                        f"({goal['completed_tasks']}/{goal['total_tasks']} 완료)"
+                    )
+
+                if state.alert_manager:
+                    await state.alert_manager.send(
+                        "info", "goal_progress",
+                        "\n".join(report_lines)
+                    )
+    except Exception as e:
+        logger.error(f"Goal progress check failed: {e}")
+
+
+async def portfolio_dashboard_job():
+    """매일 09:00: 포트폴리오 수익 대시보드 생성."""
+    logger.info("Running portfolio dashboard")
+    try:
+        if state.growth_engine:
+            dashboard = await state.growth_engine.portfolio_revenue_dashboard()
+            logger.info(f"Portfolio dashboard: ${dashboard.get('total', 0):.0f} total revenue")
+    except Exception as e:
+        logger.error(f"Portfolio dashboard failed: {e}")
+
+
+async def churn_detection_job():
+    """매일 10:00: SaaS 이탈 감지."""
+    logger.info("Running churn detection")
+    try:
+        if state.saas_ops:
+            results = await state.saas_ops.churn_detection_all()
+
+            at_risk_count = sum(len(v) for v in results.values() if v)
+            if at_risk_count > 0:
+                logger.warning(f"Churn detection: {at_risk_count} at-risk signals")
+    except Exception as e:
+        logger.error(f"Churn detection failed: {e}")
+
+
+async def meta_review_job():
+    """매주 일요일 22:00: 메타인지 리뷰 (강점/약점 분석)."""
+    logger.info("=== Running Meta-Cognition Review ===")
+    try:
+        if state.meta_cognition:
+            review = await state.meta_cognition.weekly_meta_review()
+            logger.info(f"Meta review completed: overall health = {review.get('overall_health', 'unknown')}")
+    except Exception as e:
+        logger.error(f"Meta-cognition review failed: {e}")
+
+
+async def prompt_evolution_job():
+    """매주 일요일 23:00: 프롬프트 자기 최적화 (EvoPrompt + A/B 테스트)."""
+    logger.info("=== Running Prompt Evolution ===")
+    try:
+        if state.prompt_evolver:
+            result = await state.prompt_evolver.evolve_weekly()
+            logger.info(
+                f"Prompt evolution completed: {result.get('evolved', 0)} evolved, "
+                f"{len(result.get('completed_tests', []))} A/B tests completed"
+            )
+    except Exception as e:
+        logger.error(f"Prompt evolution failed: {e}")
+
+
+async def saas_ops_daily_job():
+    """매일 08:00: SaaS 5개 일일 운영 체크."""
+    logger.info("Running SaaS operations daily check")
+    try:
+        if state.saas_ops:
+            results = await state.saas_ops.run_daily_checks()
+            logger.info(f"SaaS ops check completed: {len(results)} services checked")
+    except Exception as e:
+        logger.error(f"SaaS operations daily check failed: {e}")
+
+
+async def gumroad_ops_daily_job():
+    """매일 08:15: Gumroad 4개 일일 운영 체크."""
+    logger.info("Running Gumroad operations daily check")
+    try:
+        if state.gumroad_ops:
+            results = await state.gumroad_ops.run_daily_checks()
+            logger.info(f"Gumroad ops check completed: {len(results)} products checked")
+    except Exception as e:
+        logger.error(f"Gumroad operations daily check failed: {e}")
+
+
+async def cross_sell_analysis_job():
+    """매주 수요일 11:00: 크로스셀 기회 분석."""
+    logger.info("Running cross-sell analysis")
+    try:
+        if state.growth_engine:
+            results = await state.growth_engine.cross_sell_opportunities()
+
+            opportunities = results.get("opportunities", [])
+            if opportunities and state.alert_manager:
+                await state.alert_manager.send(
+                    "info", "cross_sell",
+                    f"💡 크로스셀 기회 발견: {len(opportunities)}개\n" +
+                    "\n".join(f"  • {o['source']}: {o.get('suggestions', ['N/A'])[0]}" for o in opportunities[:3])
+                )
+    except Exception as e:
+        logger.error(f"Cross-sell analysis failed: {e}")
+
+
+async def dynamic_skill_verification_job():
+    """매일 14:00: 동적 스킬 검증 (3회 연속 성공 → verified)."""
+    logger.info("Running dynamic skill verification")
+    try:
+        db = state.ssot._get_db()
+
+        # pending 스킬 조회
+        pending_skills = db.execute("""
+            SELECT id, skill_name, test_count, success_count
+            FROM dynamic_skills
+            WHERE status = 'pending'
+        """).fetchall()
+
+        for skill in pending_skills:
+            skill_id, name, test_count, success_count = skill
+
+            # 3회 연속 성공 체크
+            if success_count >= 3:
+                db.execute("""
+                    UPDATE dynamic_skills SET status = 'verified', updated_at = datetime('now')
+                    WHERE id = ?
+                """, [skill_id])
+                db.commit()
+
+                if state.alert_manager:
+                    await state.alert_manager.send(
+                        "info", "skill_verified",
+                        f"✅ 스킬 검증 완료: {name} (3/3 성공)"
+                    )
+                logger.info(f"Skill verified: {name}")
+
+        logger.info(f"Dynamic skill verification: {len(pending_skills)} skills checked")
+    except Exception as e:
+        logger.error(f"Dynamic skill verification failed: {e}")
+
+
+async def task_queue_processor_job():
+    """10분마다: task_queue에서 pending 태스크 실행."""
+    logger.info("Processing task queue")
+    try:
+        # task_queue에서 다음 태스크 가져오기
+        task = state.ssot.pop_next_task()
+        if not task:
+            return
+
+        task_id = task["id"]
+        task_type = task.get("task_type", "unknown")
+        target_service = task.get("target_service", "")
+        action = task.get("action", "")
+        parameters = json.loads(task.get("parameters", "{}") or "{}")
+
+        logger.info(f"Executing task {task_id}: {task_type}/{action} for {target_service}")
+
+        try:
+            # CapabilityEngine을 통해 실행
+            if state.capability_engine:
+                result = await state.capability_engine.execute_task({
+                    "task_type": task_type,
+                    "target": target_service,
+                    "action": action,
+                    "parameters": parameters
+                })
+
+                # 결과 저장
+                state.ssot.complete_task_queue_item(
+                    task_id,
+                    "done" if result.get("success") else "failed",
+                    json.dumps(result, ensure_ascii=False)
+                )
+            else:
+                state.ssot.complete_task_queue_item(task_id, "skipped", "No capability engine")
+
+        except Exception as e:
+            state.ssot.complete_task_queue_item(task_id, "failed", str(e))
+            logger.error(f"Task {task_id} execution failed: {e}")
+
+    except Exception as e:
+        logger.error(f"Task queue processor failed: {e}")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """서버 시작/종료 관리."""
-    logger.info("=== REZE Agent v3.3 Starting ===")
+    logger.info("=== REZE Agent v4.0 ULTIMATE Starting ===")
 
     # 초기화
     state.ssot = SSOT()
@@ -1824,6 +2128,61 @@ async def lifespan(app: FastAPI):
         state.ssot,
         alert_fn=state.alert_manager.send if state.alert_manager else None,
         call_llm_fn=_call_llm_for_learning,
+    )
+
+    # v4.0 ULTIMATE 초기화
+    state.capability_engine = CapabilityEngine(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        tools=state.tools,
+        discord_notify=_discord_notify_fn,
+        tavily_search=_tavily_search_fn,
+    )
+    state.autonomous_loop = AutonomousLoop(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        capability_engine=state.capability_engine,
+        discord_notify=_discord_notify_fn,
+        tavily_search=_tavily_search_fn,
+    )
+    state.goal_bridge = GoalExecutionBridge(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        discord_notify=_discord_notify_fn,
+    )
+    state.agent_supervisor = AgentSupervisor(
+        ssot=state.ssot,
+        discord_notify=_discord_notify_fn,
+    )
+    state.saas_ops = SaaSOperations(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        capability_engine=state.capability_engine,
+        discord_notify=_discord_notify_fn,
+        tavily_search=_tavily_search_fn,
+    )
+    state.gumroad_ops = GumroadOperations(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        capability_engine=state.capability_engine,
+        discord_notify=_discord_notify_fn,
+        tavily_search=_tavily_search_fn,
+    )
+    state.growth_engine = CrossPortfolioGrowth(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        discord_notify=_discord_notify_fn,
+        tavily_search=_tavily_search_fn,
+    )
+    state.meta_cognition = MetaCognitionReview(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        discord_notify=_discord_notify_fn,
+    )
+    state.prompt_evolver = PromptEvolver(
+        call_llm_fn=_call_llm_for_learning,
+        ssot=state.ssot,
+        discord_notify=_discord_notify_fn,
     )
 
     # 스케줄러
@@ -1915,6 +2274,49 @@ async def lifespan(app: FastAPI):
         id="weekly_goal_review"
     )  # 매주 월요일 09:30
 
+    # v4.0 ULTIMATE 스케줄
+    state.scheduler.add_job(
+        autonomous_loop_job, "interval", hours=6, id="autonomous_loop"
+    )  # 6시간마다 자율 루프
+    state.scheduler.add_job(
+        agent_supervisor_scan_job, "interval", minutes=30, id="agent_supervisor_scan"
+    )  # 30분마다 에이전트 감시
+    state.scheduler.add_job(
+        agent_discovery_job, "interval", hours=12, id="agent_discovery"
+    )  # 12시간마다 에이전트 발견
+    state.scheduler.add_job(
+        goal_progress_job, "cron", hour=21, minute=0, id="goal_progress"
+    )  # 매일 21:00 목표 진행
+    state.scheduler.add_job(
+        portfolio_dashboard_job, "cron", hour=9, minute=0, id="portfolio_dashboard"
+    )  # 매일 09:00 포트폴리오 대시보드
+    state.scheduler.add_job(
+        churn_detection_job, "cron", hour=10, minute=0, id="churn_detection"
+    )  # 매일 10:00 이탈 감지
+    state.scheduler.add_job(
+        meta_review_job, "cron", day_of_week="sun", hour=22, minute=0, id="meta_review"
+    )  # 일요일 22:00 메타인지 리뷰
+    state.scheduler.add_job(
+        prompt_evolution_job, "cron", day_of_week="sun", hour=23, minute=0, id="prompt_evolution"
+    )  # 일요일 23:00 프롬프트 진화
+    state.scheduler.add_job(
+        saas_ops_daily_job, "cron", hour=8, minute=0, id="saas_ops_daily"
+    )  # 매일 08:00 SaaS 운영
+    state.scheduler.add_job(
+        gumroad_ops_daily_job, "cron", hour=8, minute=15, id="gumroad_ops_daily"
+    )  # 매일 08:15 Gumroad 운영
+    state.scheduler.add_job(
+        cross_sell_analysis_job, "cron", day_of_week="wed", hour=11, minute=0,
+        id="cross_sell_analysis"
+    )  # 수요일 11:00 크로스셀 분석
+    state.scheduler.add_job(
+        dynamic_skill_verification_job, "cron", hour=14, minute=0,
+        id="dynamic_skill_verification"
+    )  # 매일 14:00 스킬 검증
+    state.scheduler.add_job(
+        task_queue_processor_job, "interval", minutes=10, id="task_queue_processor"
+    )  # 10분마다 태스크 큐 처리
+
     state.scheduler.start()
 
     # 큐 워커
@@ -1925,7 +2327,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Providers: {providers}")
     logger.info(f"Skills: {skills_count}")
     logger.info(f"Scheduler jobs: {[j.id for j in state.scheduler.get_jobs()]}")
-    logger.info("=== REZE Agent v3.3 Ready ===")
+    logger.info("=== REZE Agent v4.0 ULTIMATE Ready ===")
 
     yield
 
@@ -1949,7 +2351,7 @@ async def lifespan(app: FastAPI):
 # ============================================================
 app = FastAPI(
     title="REZE Agent",
-    version="3.3",
+    version="4.0-ultimate",
     lifespan=lifespan,
 )
 
@@ -2000,7 +2402,7 @@ class TaskResult(BaseModel):
 @app.get("/health")
 async def health():
     """헬스체크 (인증 없음)."""
-    return {"status": "ok", "version": "3.3", "agent": "REZE"}
+    return {"status": "ok", "version": "4.0-ultimate", "agent": "REZE"}
 
 
 @app.get("/health/detail")
@@ -2008,7 +2410,7 @@ async def health_detail(_=Depends(verify_token)):
     """상세 헬스체크."""
     return {
         "status": "ok",
-        "version": "3.3",
+        "version": "4.0-ultimate",
         "providers": list(state.router.providers.keys()),
         "skills": list(state.skills.catalog.keys()),
         "pending_tasks": state.ssot.count_pending(),

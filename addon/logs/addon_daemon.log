@@ -1,0 +1,48 @@
+2026-02-03 19:33:49,196 [INFO] [START] tool_discovery.scan_and_discover
+2026-02-03 19:33:50,658 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:51,991 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:53,179 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:54,538 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:55,097 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:56,312 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:33:57,963 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:00,013 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:00,620 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:01,703 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:02,858 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:03,634 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:04,308 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:05,822 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:07,272 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:08,913 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:09,649 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:10,887 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:12,147 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:13,160 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:14,210 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:15,569 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:16,901 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:18,090 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:19,001 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:20,452 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:22,240 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:23,734 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:24,550 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:25,836 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:27,514 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:27,575 [INFO] [DONE] tool_discovery (38379ms) -> {'scanned': 8, 'new': 3, 'created': 23, 'reused': 1, 'errors': []}
+2026-02-03 19:34:39,766 [INFO] [START] curiosity_engine.explore
+2026-02-03 19:34:40,518 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:41,222 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-03 19:34:41,238 [INFO] [DONE] curiosity_engine (1472ms) -> {'generated': 2, 'answered': 2, 'promoted': 2, 'high_value': ['postpilot 새 경쟁자?', 'browserpilot 가장 많이 쓰는 기능?']}
+2026-02-03 19:34:52,244 [INFO] [START] memory_tier.consolidate
+2026-02-03 19:34:52,264 [INFO] [DONE] memory_tier (19ms) -> {'synced': 0, 'compressed': 0, 'decayed': 1}
+2026-02-03 19:35:01,027 [INFO] REZE ADDON DAEMON started
+2026-02-03 19:35:01,027 [INFO] Schedules registered
+2026-02-04 01:35:01,144 [INFO] [START] curiosity_engine.explore
+2026-02-04 01:35:02,031 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 01:35:03,002 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 01:35:04,077 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 01:35:04,095 [INFO] [DONE] curiosity_engine (2951ms) -> {'generated': 3, 'answered': 3, 'promoted': 3, 'high_value': ['rag-service 가장 많이 쓰는 기능?', '새 수익 모델?', 'Docker 컨테이너 리소스 낭비?']}
+2026-02-04 03:00:04,128 [INFO] [START] memory_tier.consolidate
+2026-02-04 03:00:04,144 [INFO] [DONE] memory_tier (16ms) -> {'synced': 0, 'compressed': 0, 'decayed': 1}

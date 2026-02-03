@@ -624,6 +624,9 @@ class CircuitBreaker:
 class REZECore:
     """REZE의 두뇌. 자연어 태스크 → 도구 조합 → 결과."""
 
+    # v4.0 ULTIMATE: 8 Capabilities
+    CAPABILITIES = ["collect", "analyze", "create", "execute", "verify", "communicate", "optimize", "learn"]
+
     def __init__(
         self,
         ssot: SSOT,
@@ -632,6 +635,7 @@ class REZECore:
         router: ModelRouter,
         skills_manager: SkillsManager,
         circuit_breaker: CircuitBreaker,
+        capability_engine=None,  # v4.0 ULTIMATE
     ):
         self.ssot = ssot
         self.tools = tools
@@ -640,6 +644,7 @@ class REZECore:
         self.skills_manager = skills_manager
         self.circuit_breaker = circuit_breaker
         self.output_validator = OutputValidator()
+        self.capability_engine = capability_engine  # v4.0 ULTIMATE
 
     async def run(self, task: str, source: str = "api") -> dict:
         """메인 ReAct 루프 (v4.0: 학습 루프 통합)."""
@@ -1018,3 +1023,76 @@ JSON: {{"lesson": "...", "improvement": "...", "pattern": "..."}}"""
                 except:
                     pass
         return "\n".join(steps) if steps else "절차 추출 실패"
+
+    # ============================================================
+    # v4.0 ULTIMATE: Capability-Based Execution
+    # ============================================================
+
+    async def identify_required_capabilities(self, task: str) -> list:
+        """태스크에 필요한 capability 목록 식별."""
+        prompt = f"""태스크: {task}
+
+이 태스크를 완료하기 위해 필요한 역량을 순서대로 나열하시오.
+
+가용 역량:
+- collect: 정보/데이터 수집
+- analyze: 데이터 분석, 패턴 발견
+- create: 콘텐츠/코드/산출물 생성
+- execute: 명령 실행, 배포, 자동화
+- verify: 품질 검증, 테스트
+- communicate: 보고, 알림, 이메일
+- optimize: 성능/비용 최적화
+- learn: 학습, 피드백 반영
+
+JSON 배열로만 답하시오 (예: ["collect", "analyze", "create"])"""
+
+        try:
+            result = await self.router.call("classification", [{"role": "user", "content": prompt}])
+            text = result.text.strip()
+            if text.startswith("["):
+                caps = json.loads(text)
+                return [c for c in caps if c in self.CAPABILITIES]
+        except Exception as e:
+            logger.warning(f"Capability identification failed: {e}")
+        return ["analyze", "execute"]  # 기본값
+
+    async def run_with_capabilities(self, task: str, target_service: str = None,
+                                     source: str = "capability") -> dict:
+        """v4.0 ULTIMATE: Capability 기반 태스크 실행."""
+        if not self.capability_engine:
+            # capability engine이 없으면 기존 방식 사용
+            return await self.run(task, source=source)
+
+        logger.info(f"Running with capabilities: {task[:100]}")
+
+        try:
+            # 1. 필요한 capability 식별
+            required_caps = await self.identify_required_capabilities(task)
+            logger.info(f"Required capabilities: {required_caps}")
+
+            # 2. CapabilityEngine으로 실행
+            result = await self.capability_engine.plan_and_execute(
+                task=task,
+                target_service=target_service,
+                required_capabilities=required_caps
+            )
+
+            # 3. 결과 정규화
+            return {
+                "success": result.get("success", False),
+                "answer": result.get("answer", str(result)),
+                "task_id": result.get("task_id", "cap_" + self.ssot._new_id("cap")),
+                "steps": len(required_caps),
+                "total_tokens": result.get("total_tokens", 0),
+                "skills_used": [],
+                "capabilities_used": required_caps,
+                "quality_score": result.get("quality_score", 0.7),
+            }
+        except Exception as e:
+            logger.error(f"Capability-based execution failed: {e}")
+            # fallback to traditional execution
+            return await self.run(task, source=source)
+
+    def set_capability_engine(self, capability_engine):
+        """v4.0 ULTIMATE: CapabilityEngine 설정."""
+        self.capability_engine = capability_engine

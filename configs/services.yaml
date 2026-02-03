@@ -1,0 +1,482 @@
+# REZE v4.0 ULTIMATE Service Registry
+# 전체 서비스 레지스트리 - 블로그, SaaS, Gumroad, 인프라
+
+# ========== BLOGS (10개 계획) ==========
+blogs:
+  ai-tools-lab:
+    url: "https://aitoolslab.com"
+    type: "blog"
+    wp_path: "/var/www/aitoolslab"
+    niche: "AI tools"
+    monetization: "affiliate"
+    publish_schedule: "mon,wed,fri 09:00"
+    target_articles_weekly: 3
+    competitors:
+      - name: "TechRadar AI"
+        url: "https://techradar.com/best/ai-tools"
+        check: "features"
+      - name: "Zapier Blog"
+        url: "https://zapier.com/blog"
+        check: "pricing"
+    search_queries:
+      - "AI tools trends 2026"
+      - "best AI tools comparison"
+      - "AI productivity tools review"
+    revenue_tracking:
+      source: "affiliate"
+      dashboard: "impact_radius"
+    health_url: "https://aitoolslab.com/health"
+    auto_actions:
+      traffic_drop: "seo_audit"
+      new_competitor_article: "analyze_and_respond"
+
+  nocode-tools-lab:
+    url: "https://nocodetoolslab.com"
+    type: "blog"
+    wp_path: "/var/www/nocodetoolslab"
+    niche: "no-code tools"
+    monetization: "affiliate"
+    publish_schedule: "tue,thu,sat 09:00"
+    target_articles_weekly: 3
+    competitors:
+      - name: "NoCodeDevs"
+        url: "https://nocodedevs.com"
+        check: "features"
+      - name: "Makerpad"
+        url: "https://makerpad.co"
+        check: "content"
+    search_queries:
+      - "no-code platform trends"
+      - "best no-code tools 2026"
+      - "no-code vs low-code comparison"
+    revenue_tracking:
+      source: "affiliate"
+      dashboard: "impact_radius"
+    health_url: "https://nocodetoolslab.com/health"
+
+  # 추가 예정 블로그 (8개)
+  elearning-lab:
+    url: "https://elearninglab.com"
+    type: "blog"
+    status: "planned"
+    niche: "e-learning tools"
+    monetization: "affiliate"
+
+  finance-tools-lab:
+    url: "https://financetoolslab.com"
+    type: "blog"
+    status: "planned"
+    niche: "finance/fintech tools"
+    monetization: "affiliate"
+
+  vpn-lab:
+    url: "https://vpnlab.com"
+    type: "blog"
+    status: "planned"
+    niche: "VPN/security tools"
+    monetization: "affiliate"
+
+  design-tools-lab:
+    url: "https://designtoolslab.com"
+    type: "blog"
+    status: "planned"
+    niche: "design tools"
+    monetization: "affiliate"
+
+  marketing-tools-lab:
+    url: "https://marketingtoolslab.com"
+    type: "blog"
+    status: "planned"
+    niche: "marketing automation"
+    monetization: "affiliate"
+
+  dev-tools-lab:
+    url: "https://devtoolslab.com"
+    type: "blog"
+    status: "planned"
+    niche: "developer tools"
+    monetization: "affiliate"
+
+  productivity-lab:
+    url: "https://productivitylab.com"
+    type: "blog"
+    status: "planned"
+    niche: "productivity apps"
+    monetization: "affiliate"
+
+  automation-lab:
+    url: "https://automationlab.com"
+    type: "blog"
+    status: "planned"
+    niche: "automation tools"
+    monetization: "affiliate"
+
+
+# ========== SaaS (5개) ==========
+saas:
+  postpilot:
+    url: "https://postpilot.runstate.dev"
+    type: "saas"
+    tech_stack: "Next.js + FastAPI + PostgreSQL"
+    payment: "lemon_squeezy"
+    health_url: "https://postpilot.runstate.dev/api/health"
+    pm2_name: "postpilot-backend"
+
+    funnel:
+      signup_endpoint: "/api/auth/register"
+      activation_event: "first_blog_published"
+      payment_endpoint: "/api/payments/subscribe"
+      churn_indicator: "no_login_7days"
+
+    competitors:
+      - name: "BlogAI"
+        url: "https://blogai.com"
+        check: "pricing_page"
+      - name: "Writesonic"
+        url: "https://writesonic.com"
+        check: "features"
+      - name: "Copy.ai"
+        url: "https://copy.ai"
+        check: "pricing"
+
+    revenue:
+      source: "lemon_squeezy_api"
+      mrr_target: 500
+      key_metrics: ["mrr", "churn_rate", "ltv", "arpu"]
+
+    auto_actions:
+      churn_detected: "send_retention_email"
+      payment_failed: "retry_3_times_then_alert"
+      new_signup: "send_onboarding_sequence"
+      feature_request: "log_to_feature_board"
+
+    search_queries:
+      - "blog automation SaaS market"
+      - "AI content generation pricing"
+      - "WordPress automation tools"
+
+  quotepilot:
+    url: "https://quotepilot.runstate.dev"
+    type: "saas"
+    tech_stack: "FastAPI + PostgreSQL + Stripe"
+    payment: "stripe"
+    health_url: "https://quotepilot.runstate.dev/api/health"
+    pm2_name: "quotepilot-api"
+    target_market: "catering companies"
+    market_size: "$1.1B catering software"
+
+    funnel:
+      signup_endpoint: "/api/auth/register"
+      activation_event: "first_quote_created"
+      payment_endpoint: "/api/payments/checkout"
+      churn_indicator: "no_quote_14days"
+
+    competitors:
+      - name: "CaterZen"
+        url: "https://caterzen.com"
+        check: "pricing"
+      - name: "Better Cater"
+        url: "https://bettercater.com"
+        check: "features"
+      - name: "Total Party Planner"
+        url: "https://totalpartyplanner.com"
+        check: "pricing"
+
+    revenue:
+      source: "stripe_api"
+      mrr_target: 300
+      key_metrics: ["mrr", "quotes_created", "conversion_rate"]
+
+    search_queries:
+      - "catering software trends"
+      - "quote automation market"
+      - "catering business software"
+
+  browserpilot:
+    url: "https://browserpilot.runstate.dev"
+    type: "saas"
+    tech_stack: "FastAPI + Playwright + PostgreSQL"
+    payment: "lemon_squeezy"
+    health_url: "https://browserpilot.runstate.dev/api/health"
+    pm2_name: "browserpilot-api"
+
+    funnel:
+      signup_endpoint: "/api/auth/register"
+      activation_event: "first_automation_run"
+      payment_endpoint: "/api/payments/subscribe"
+      churn_indicator: "no_run_14days"
+
+    competitors:
+      - name: "Browserless"
+        url: "https://browserless.io"
+        check: "pricing"
+      - name: "Apify"
+        url: "https://apify.com"
+        check: "features"
+
+    revenue:
+      source: "lemon_squeezy_api"
+      mrr_target: 200
+      key_metrics: ["mrr", "automations_run", "api_calls"]
+
+    search_queries:
+      - "browser automation API market"
+      - "headless browser as a service"
+
+  agenthub:
+    url: "https://agenthub.runstate.dev"
+    type: "saas"
+    tech_stack: "Next.js + FastAPI + PostgreSQL"
+    payment: "lemon_squeezy"
+    health_url: "https://agenthub.runstate.dev/api/health"
+    pm2_name: "agenthub-api"
+
+    funnel:
+      signup_endpoint: "/api/auth/register"
+      activation_event: "first_agent_created"
+      payment_endpoint: "/api/payments/subscribe"
+      churn_indicator: "no_agent_30days"
+
+    competitors:
+      - name: "Botpress"
+        url: "https://botpress.com"
+        check: "pricing"
+      - name: "Voiceflow"
+        url: "https://voiceflow.com"
+        check: "features"
+
+    revenue:
+      source: "lemon_squeezy_api"
+      mrr_target: 300
+      key_metrics: ["mrr", "agents_created", "api_calls"]
+
+    search_queries:
+      - "AI agent platform market"
+      - "autonomous agent builder"
+
+  rag-service:
+    url: "https://rag.runstate.dev"
+    type: "saas"
+    tech_stack: "FastAPI + ChromaDB + PostgreSQL"
+    payment: "lemon_squeezy"
+    health_url: "https://rag.runstate.dev/api/health"
+    pm2_name: "rag-service"
+
+    funnel:
+      signup_endpoint: "/api/auth/register"
+      activation_event: "first_document_indexed"
+      payment_endpoint: "/api/payments/subscribe"
+      churn_indicator: "no_query_14days"
+
+    competitors:
+      - name: "Pinecone"
+        url: "https://pinecone.io"
+        check: "pricing"
+      - name: "Weaviate Cloud"
+        url: "https://weaviate.io"
+        check: "features"
+
+    revenue:
+      source: "lemon_squeezy_api"
+      mrr_target: 200
+      key_metrics: ["mrr", "documents_indexed", "queries_per_day"]
+
+    search_queries:
+      - "RAG as a service market"
+      - "vector database pricing"
+
+
+# ========== GUMROAD (4개) ==========
+gumroad:
+  ai-automation-guide:
+    type: "gumroad"
+    gumroad_id: "xxx"
+    price: 29
+    category: "ebook"
+    target_audience: "solo entrepreneurs"
+    status: "planned"
+
+    revenue:
+      source: "gumroad_api"
+      monthly_target: 100
+      key_metrics: ["sales_count", "revenue", "refund_rate", "reviews"]
+
+    auto_actions:
+      low_sales: "optimize_sales_page"
+      negative_review: "analyze_and_improve"
+      price_test: "weekly_ab_test"
+
+    search_queries:
+      - "AI automation ebook market"
+      - "digital product pricing strategy"
+
+    competitors:
+      - search: "AI automation guide gumroad"
+
+  nocode-toolkit:
+    type: "gumroad"
+    gumroad_id: "xxx"
+    price: 49
+    category: "template_bundle"
+    target_audience: "no-code builders"
+    status: "planned"
+
+    revenue:
+      source: "gumroad_api"
+      monthly_target: 80
+      key_metrics: ["sales_count", "revenue", "refund_rate"]
+
+    search_queries:
+      - "no-code templates gumroad"
+      - "notion template market"
+
+  unmanned-publisher-guide:
+    type: "gumroad"
+    gumroad_id: "xxx"
+    price: 39
+    category: "ebook"
+    target_audience: "content creators"
+    status: "planned"
+
+    revenue:
+      source: "gumroad_api"
+      monthly_target: 60
+      key_metrics: ["sales_count", "revenue"]
+
+    search_queries:
+      - "content automation guide"
+      - "passive income blogging"
+
+  saas-launch-playbook:
+    type: "gumroad"
+    gumroad_id: "xxx"
+    price: 59
+    category: "ebook"
+    target_audience: "indie hackers"
+    status: "planned"
+
+    revenue:
+      source: "gumroad_api"
+      monthly_target: 100
+      key_metrics: ["sales_count", "revenue"]
+
+    search_queries:
+      - "SaaS launch guide"
+      - "indie hacker playbook"
+
+
+# ========== INFRASTRUCTURE ==========
+infrastructure:
+  docker_host:
+    type: "server"
+    name: "main-server"
+    health_checks:
+      - metric: "disk_usage"
+        threshold: 85
+        unit: "%"
+      - metric: "memory_usage"
+        threshold: 80
+        unit: "%"
+      - metric: "cpu_load"
+        threshold: 90
+        unit: "%"
+    auto_actions:
+      disk_high: "clean_docker_images_and_logs"
+      memory_high: "identify_and_restart_leaky_containers"
+      cpu_high: "analyze_and_throttle"
+    monitoring_commands:
+      disk: "df -h /"
+      memory: "free -m"
+      cpu: "top -bn1 | head -5"
+
+  nginx:
+    type: "reverse_proxy"
+    config_path: "/etc/nginx/sites-enabled/"
+    health_url: "http://localhost:80"
+    ssl_certs:
+      - "*.runstate.dev"
+      - "aitoolslab.com"
+      - "nocodetoolslab.com"
+    auto_actions:
+      cert_expiring: "auto_renew_certbot"
+      config_error: "rollback_and_alert"
+    health_check_command: "nginx -t"
+
+  postgresql:
+    type: "database"
+    port: 5433
+    health_check: "pg_isready -p 5433"
+    auto_actions:
+      connection_pool_high: "analyze_and_optimize_queries"
+      backup_overdue: "trigger_backup"
+      slow_queries: "analyze_and_index"
+    monitoring_commands:
+      connections: "SELECT count(*) FROM pg_stat_activity"
+      size: "SELECT pg_size_pretty(pg_database_size('postgres'))"
+
+  redis:
+    type: "cache"
+    port: 6379
+    health_check: "redis-cli ping"
+    auto_actions:
+      memory_high: "flush_old_keys"
+
+  n8n:
+    type: "workflow"
+    url: "http://localhost:5678"
+    health_url: "http://localhost:5678/healthz"
+    api_key_env: "N8N_API_KEY"
+    auto_actions:
+      workflow_failed: "analyze_and_retry"
+      execution_stuck: "cancel_and_restart"
+
+
+# ========== AGENT MONITORING ==========
+agent_types:
+  docker_container:
+    check: "docker inspect --format='{{.State.Status}}' {name}"
+    healthy: "running"
+    restart: "docker restart {name}"
+    max_auto_restarts: 3
+
+  n8n_workflow:
+    check: "curl -s http://localhost:5678/api/v1/workflows/{id}"
+    healthy_field: "active"
+    activate: "curl -X PATCH http://localhost:5678/api/v1/workflows/{id}/activate"
+
+  pm2_process:
+    check: "pm2 jlist"
+    healthy: "online"
+    restart: "pm2 restart {name}"
+    max_auto_restarts: 3
+
+  cron_job:
+    check: "grep '{pattern}' /var/log/syslog | tail -1"
+    healthy: "last_run within expected_interval"
+
+  dify_app:
+    check: "curl -s http://localhost:3000/api/apps/{id}/status"
+    healthy_field: "status"
+    healthy_value: "active"
+
+
+# ========== GOALS ==========
+goals:
+  primary:
+    name: "월수익 $5K"
+    target_date: "2026-06-30"
+    breakdown:
+      blogs: 1500  # 30%
+      saas: 2500   # 50%
+      gumroad: 1000  # 20%
+
+  quarterly:
+    Q1_2026:
+      target: 2000
+      focus: ["PostPilot launch", "3 more blogs"]
+    Q2_2026:
+      target: 3500
+      focus: ["QuotePilot growth", "Gumroad products"]
+    Q3_2026:
+      target: 5000
+      focus: ["Scale all channels"]
