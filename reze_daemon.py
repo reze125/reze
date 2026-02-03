@@ -1823,14 +1823,18 @@ async def autonomous_loop_job():
     logger.info("=== Running Autonomous Loop ===")
     try:
         if state.autonomous_loop:
-            result = await state.autonomous_loop.run_cycle()
-            logger.info(f"Autonomous loop completed: {result.get('targets_processed', 0)} targets processed")
+            cycle_results = await state.autonomous_loop.run_cycle()
+            # run_cycle()은 list를 반환
+            targets_processed = len(cycle_results) if isinstance(cycle_results, list) else 0
+            actions_taken = sum(1 for r in (cycle_results or [])
+                              if isinstance(r, dict) and r.get('status') == 'success')
+            logger.info(f"Autonomous loop completed: {targets_processed} targets processed")
 
-            if state.alert_manager and result.get("targets_processed", 0) > 0:
+            if state.alert_manager and targets_processed > 0:
                 await state.alert_manager.send(
                     "info", "autonomous_loop",
-                    f"🔄 자율 루프 완료: {result.get('targets_processed')}개 서비스 처리, "
-                    f"액션 {result.get('actions_taken', 0)}개 실행"
+                    f"🔄 자율 루프 완료: {targets_processed}개 서비스 처리, "
+                    f"액션 {actions_taken}개 실행"
                 )
     except Exception as e:
         logger.error(f"Autonomous loop failed: {e}")
@@ -1841,10 +1845,11 @@ async def agent_supervisor_scan_job():
     logger.info("Running agent supervisor scan")
     try:
         if state.agent_supervisor:
-            result = await state.agent_supervisor.run_health_check()
+            # scan_all_agents()는 issues 리스트를 반환
+            issues = await state.agent_supervisor.scan_all_agents()
 
-            # 문제 있으면 자동 복구 시도
-            unhealthy = [a for a in result.get("agents", []) if a.get("status") != "healthy"]
+            # 문제 있으면 자동 복구 시도 (issues는 이미 unhealthy 에이전트 목록)
+            unhealthy = [i.get("agent", {}) for i in issues if isinstance(i, dict)]
             if unhealthy:
                 for agent in unhealthy[:3]:  # 최대 3개 동시 복구
                     try:
@@ -1871,7 +1876,7 @@ async def agent_discovery_job():
     logger.info("Running agent discovery")
     try:
         if state.agent_supervisor:
-            discovered = await state.agent_supervisor.discover_agents()
+            discovered = await state.agent_supervisor.auto_discover_agents()
 
             if discovered:
                 logger.info(f"Discovered {len(discovered)} new agents")
@@ -1889,14 +1894,16 @@ async def goal_progress_job():
     logger.info("Running goal progress check")
     try:
         if state.goal_bridge:
-            progress = await state.goal_bridge.check_all_progress()
+            # progress_check()는 results 리스트를 반환 (또는 {"message": ...} dict)
+            progress_results = await state.goal_bridge.progress_check()
 
-            if progress.get("goals"):
+            # 리스트인 경우에만 리포트 생성
+            if isinstance(progress_results, list) and progress_results:
                 report_lines = ["📋 일일 목표 진행 현황"]
-                for goal in progress["goals"][:5]:
+                for goal in progress_results[:5]:
                     report_lines.append(
-                        f"  • {goal['goal'][:40]}: {goal['progress']}% "
-                        f"({goal['completed_tasks']}/{goal['total_tasks']} 완료)"
+                        f"  • {goal['goal'][:40]}: {goal['progress']:.0f}% "
+                        f"({goal['tasks_done']}/{goal['tasks_total']} 완료)"
                     )
 
                 if state.alert_manager:
@@ -2052,14 +2059,32 @@ async def task_queue_processor_job():
         logger.info(f"Executing task {task_id}: {task_type}/{action} for {target_service}")
 
         try:
-            # CapabilityEngine을 통해 실행
+            # CapabilityEngine을 통해 실행 (plan_capabilities → execute_plan)
             if state.capability_engine:
-                result = await state.capability_engine.execute_task({
-                    "task_type": task_type,
-                    "target": target_service,
-                    "action": action,
-                    "parameters": parameters
-                })
+                # 태스크 설명 생성
+                task_description = f"{action} for {target_service}"
+                if parameters:
+                    task_description += f" (params: {json.dumps(parameters, ensure_ascii=False)[:100]})"
+
+                # 역량 계획 수립
+                plan = await state.capability_engine.plan_capabilities(
+                    task_description,
+                    context={
+                        "task_type": task_type,
+                        "target": target_service,
+                        "parameters": parameters
+                    }
+                )
+
+                # 계획 실행
+                result = await state.capability_engine.execute_plan(
+                    plan,
+                    context={
+                        "task_id": task_id,
+                        "target": target_service,
+                        "parameters": parameters
+                    }
+                )
 
                 # 결과 저장
                 state.ssot.complete_task_queue_item(

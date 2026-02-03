@@ -33,6 +33,7 @@ def run_module(mod_name, func_name):
         else:
             r = {"error": f"Unknown: {mod_name}"}
         ms = int((time.time()-start)*1000)
+        db.log_run(mod_name, "success", str(r)[:500], ms)  # 성공 로그 추가
         logger.info(f"[DONE] {mod_name} ({ms}ms) -> {str(r)[:200]}")
     except Exception as e:
         logger.error(f"[FAIL] {mod_name}: {e}"); logger.error(traceback.format_exc())

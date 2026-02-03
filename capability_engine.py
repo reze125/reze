@@ -88,16 +88,21 @@ class CapabilityEngine:
     도메인 구분 없이 역량 조합으로 모든 태스크 처리.
     """
 
-    def __init__(self, call_llm_fn: Callable, ssot, tools: dict = None):
+    def __init__(self, call_llm_fn: Callable, ssot, tools: dict = None,
+                 discord_notify: Callable = None, tavily_search: Callable = None):
         """
         Args:
             call_llm_fn: LLM 호출 함수 (async, prompt + role 인자)
             ssot: SSOT 인스턴스
             tools: 사용 가능한 도구들 딕셔너리
+            discord_notify: Discord 알림 함수
+            tavily_search: Tavily 검색 함수
         """
         self.call_llm = call_llm_fn
         self.ssot = ssot
         self.tools = tools or {}
+        self.discord_notify = discord_notify
+        self.tavily_search = tavily_search
         self.capabilities = CAPABILITY_METASKILLS
 
     def get_capability(self, name: str) -> "Capability":

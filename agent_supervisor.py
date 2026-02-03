@@ -388,6 +388,27 @@ class AgentSupervisor:
                                        status)
         return {"agent": agent_name, "status": status}
 
+    async def recover_agent(self, agent_name: str) -> dict:
+        """특정 에이전트 복구 시도 (public wrapper for _auto_recover)."""
+        agent = self.ssot.conn.execute(
+            "SELECT * FROM supervised_agents WHERE name = ?",
+            [agent_name]
+        ).fetchone()
+
+        if not agent:
+            return {"success": False, "error": f"Agent not found: {agent_name}"}
+
+        agent_dict = dict(agent)
+        status = await self._check_agent(agent_dict)
+
+        if status["healthy"]:
+            return {"success": True, "action": "Already healthy"}
+
+        if not status.get("auto_recoverable"):
+            return {"success": False, "action": "Not auto-recoverable"}
+
+        return await self._auto_recover(agent_dict, status)
+
 
 # === 편의 함수 ===
 
