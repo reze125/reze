@@ -702,12 +702,54 @@ async def trend_scan_job():
                 except Exception as e:
                     logger.warning(f"Self-evolution from trend scan failed: {e}")
 
+        # === Phase 4: 추가 소스에서 수집 (HackerNews, GitHub Trending, RSS) ===
+        extra_count = 0
+        try:
+            from input_sources import collect_all_sources, classify_discovery
+            extra_discoveries = await collect_all_sources()
+
+            for item in extra_discoveries:
+                disc_type = classify_discovery(item)
+                discovery = {
+                    "type": disc_type,
+                    "tool_name": item.get("title", ""),
+                    "summary": item.get("description", item.get("url", "")),
+                    "source": item.get("source", "external"),
+                    "url": item.get("url", ""),
+                }
+                await process_discovery(disc_type, f"trend_scan_{item.get('source', 'external')}", discovery)
+
+                # self_improvement_tech는 자기 진화 시도
+                if disc_type == "self_improvement_tech" and discovery.get("tool_name"):
+                    try:
+                        from self_evolution import SelfEvolution
+                        evolver = SelfEvolution(
+                            _call_llm_for_learning,
+                            state.ssot.save_signal,
+                            state.ssot._get_db
+                        )
+                        tech_info = {
+                            "name": discovery["tool_name"][:50],
+                            "description": discovery.get("summary", "")[:200],
+                            "source": f"trend_scan_{item.get('source', 'external')}"
+                        }
+                        evo_result = await evolver.evaluate_and_evolve(tech_info)
+                        if evo_result.get("success"):
+                            logger.info(f"Auto-evolution from external: {tech_info['name']}")
+                    except Exception as e:
+                        logger.warning(f"Self-evolution from external source failed: {e}")
+
+                extra_count += 1
+        except Exception as e:
+            logger.warning(f"External source collection failed: {e}")
+
         state.ssot.save_signal("trend_scan_complete", json.dumps({
             "discoveries": len(discoveries),
+            "external_discoveries": extra_count,
             "sources_checked": len(sources)
         }))
 
-        logger.info(f"Trend scan complete: {len(discoveries)} discoveries")
+        logger.info(f"Trend scan complete: {len(discoveries)} LLM + {extra_count} external")
 
     except Exception as e:
         logger.error(f"Trend scan failed: {e}")
@@ -903,6 +945,41 @@ async def strategic_thinking_job():
                 state.ssot.save_signal("lesson_learned", lesson)
 
             state.ssot.save_signal("weekly_strategy", json.dumps(strategy))
+
+            # === Phase 4: 시장 진입 제안 ===
+            try:
+                from blog_spinup import BlogSpinup
+                spinup = BlogSpinup(_call_llm_for_learning, state.ssot.save_signal)
+
+                # 최근 발견에서 반복 등장하는 니치 분석
+                db = state.ssot._get_db()
+                popular_niches = db.execute(
+                    """SELECT discovery_type, COUNT(*) as cnt
+                       FROM discoveries
+                       WHERE created_at > datetime('now', '-7 days')
+                       GROUP BY discovery_type
+                       ORDER BY cnt DESC LIMIT 5"""
+                ).fetchall()
+
+                # 현재 블로그 수 체크
+                current_blogs = 2  # AI Tools Lab, NoCode Tools Lab
+                target_blogs = 10
+
+                if current_blogs < target_blogs and popular_niches:
+                    # 가장 자주 발견되는 니치 기반으로 블로그 제안
+                    top_niche = popular_niches[0][0] if popular_niches else ""
+
+                    proposal = await spinup.propose_new_blog(niche=top_niche)
+
+                    if proposal.get("competition_level") != "high" and "raw" not in proposal:
+                        from discord_interactive import request_boss_approval
+                        await request_boss_approval(
+                            action=f"새 블로그: {proposal.get('brand_name', 'unknown')}",
+                            reason=f"니치: {proposal.get('niche')}, 예상 6개월 수익: {proposal.get('estimated_monthly_revenue_6m', '?')}",
+                            analysis=json.dumps(proposal, ensure_ascii=False)[:500]
+                        )
+            except Exception as e:
+                logger.warning(f"Blog spinup proposal failed: {e}")
 
         except json.JSONDecodeError:
             logger.warning(f"Strategy parse failed: {text[:200]}")
@@ -1186,6 +1263,53 @@ JSON만 반환.
     # 메타학습 트리거
     await learner.meta_learn()
 
+    # === Phase 4: 자율 등급 평가 + 자기 개선 루프 ===
+    try:
+        from autonomy_adjuster import AutonomyAdjuster
+        adjuster = AutonomyAdjuster(state.ssot._get_db, state.ssot.save_signal)
+        autonomy_result = await adjuster.evaluate_autonomy()
+
+        # 승인 필요한 제안이 있으면 Discord로 전송
+        from discord_interactive import request_boss_approval
+        for proposal in autonomy_result.get("proposals", []):
+            if proposal.get("requires_approval"):
+                await request_boss_approval(
+                    action=proposal["action"],
+                    reason=proposal["reason"],
+                    analysis=f"Risk: {proposal['risk']}"
+                )
+            elif proposal.get("auto_action") == "pause_evolution":
+                # 자동 실행: 진화 일시 중지
+                state.ssot.save_signal("evolution_paused", json.dumps({
+                    "reason": proposal["reason"],
+                    "auto": True,
+                }))
+                logger.warning(f"Evolution auto-paused: {proposal['reason']}")
+
+        # 원칙 -> plan_cache 자동 적용
+        meta_signals = db.execute(
+            """SELECT data FROM signals
+               WHERE kind='meta_learning'
+               ORDER BY created_at DESC LIMIT 1"""
+        ).fetchone()
+
+        if meta_signals:
+            try:
+                meta = json.loads(meta_signals[0])
+                principles = meta.get("principles", [])
+                if principles:
+                    db.execute(
+                        """INSERT OR REPLACE INTO plan_cache (key, value, updated_at)
+                           VALUES ('meta_principles', ?, datetime('now'))""",
+                        (json.dumps(principles, ensure_ascii=False),)
+                    )
+                    db.commit()
+                    logger.info(f"Meta principles applied to plan_cache: {len(principles)}")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Autonomy evaluation failed: {e}")
+
     state.ssot.save_signal("self_assessment", json.dumps({
         "evolutions": {"success": success, "failed": failed},
         "lessons": lessons_count,
@@ -1196,8 +1320,8 @@ JSON만 반환.
 
 
 async def cost_review_job():
-    """매월 1일 09시: 비용 분석."""
-    logger.info("=== Cost Review Start ===")
+    """매월 1일 09시: 비용 + 수익 분석."""
+    logger.info("=== Monthly Review Start ===")
 
     db = state.ssot._get_db()
 
@@ -1213,6 +1337,19 @@ async def cost_review_job():
         "SELECT COUNT(*) FROM discoveries WHERE created_at > datetime('now', '-30 days')"
     ).fetchone()[0]
 
+    # Phase 4: 수익 추적
+    revenue_report = None
+    try:
+        from revenue_tracker import RevenueTracker
+        tracker = RevenueTracker(
+            state.ssot._get_db,
+            state.ssot.save_signal,
+            _call_llm_for_learning
+        )
+        revenue_report = await tracker.monthly_report()
+    except Exception as e:
+        logger.warning(f"Revenue tracking failed: {e}")
+
     analysis = await _call_llm_for_learning(
         f"""REZE 월간 비용 분석.
 진화: {month_evolutions}회, 블로그: {month_blogs}개, 발견: {month_discoveries}건
@@ -1225,14 +1362,30 @@ JSON만 반환.""",
 
     state.ssot.save_signal("cost_review", json.dumps({"analysis": analysis}))
 
-    msg = f"**월간 비용**\n진화:{month_evolutions} | 블로그:{month_blogs} | 발견:{month_discoveries}\n{analysis[:500]}"
+    # Discord 리포트 (비용 + 수익)
+    strategy = revenue_report.get("strategy", {}) if revenue_report else {}
+    priorities = strategy.get("next_month_priorities", ["N/A"])
+
+    msg = f"""**REZE 월간 리뷰**
+
+**실적:**
+블로그: {month_blogs}개
+발견: {month_discoveries}건
+진화: {month_evolutions}회
+
+**전략:**
+다음 달 우선순위: {', '.join(priorities[:3])}
+새 블로그 추가: {'권장' if strategy.get('should_add_blog') else '아직'}
+
+{analysis[:300]}"""
+
     try:
         async with aiohttp.ClientSession() as session:
             await session.post(config.DISCORD_WEBHOOK_DAILY, json={"content": msg[:1900]})
     except Exception as e:
-        logger.warning(f"Cost review Discord notification failed: {e}")
+        logger.warning(f"Monthly review Discord notification failed: {e}")
 
-    logger.info("=== Cost Review Complete ===")
+    logger.info("=== Monthly Review Complete ===")
 
 
 # ============================================================
@@ -1345,6 +1498,10 @@ app = FastAPI(
     version="3.3",
     lifespan=lifespan,
 )
+
+# Phase 4: Boss API 라우터 등록
+from discord_interactive import router as boss_router
+app.include_router(boss_router)
 
 
 # === 인증 ===
