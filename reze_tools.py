@@ -1,4 +1,6 @@
-"""REZE Tools — 5개 범용 도구 실행기"""
+"""REZE Tools v5.0 — 6개 범용 도구 실행기
+shell, python, http, web_search, web_fetch, code_edit
+"""
 import json
 import subprocess
 from typing import Any, Optional
@@ -74,7 +76,7 @@ class ToolExecutor:
                 return f"BLOCKED: '{tool}' 명령이 DANGEROUS 등급입니다. source={source}에서 자동 실행 불가."
             logger.warning(f"DANGEROUS but allowed (source={source}): {tool} {str(tool_input)[:80]}")
 
-        # 2. 실행
+        # 2. 실행 (v5.0: 6개 도구)
         try:
             if tool == "shell":
                 result = self._exec_shell(str(tool_input))
@@ -86,6 +88,10 @@ class ToolExecutor:
                 result = self._exec_filesystem(tool_input)
             elif tool == "web_search":
                 result = await self._exec_web_search(str(tool_input))
+            elif tool == "web_fetch":
+                result = await self._exec_web_fetch(tool_input)
+            elif tool == "code_edit":
+                result = self._exec_code_edit(tool_input)
             else:
                 result = f"ERROR: Unknown tool '{tool}'"
         except Exception as e:
@@ -120,7 +126,9 @@ class ToolExecutor:
             return f"ERROR: Shell failed — {e}"
 
     async def _exec_http(self, request: Any) -> str:
-        """HTTP 요청 실행."""
+        """HTTP 요청 실행 (v5.0: 자동 인증 + JSON 파싱)."""
+        import os
+
         if isinstance(request, str):
             try:
                 request = json.loads(request)
@@ -130,11 +138,23 @@ class ToolExecutor:
 
         url = request.get("url", "")
         method = request.get("method", "GET").upper()
-        headers = request.get("headers", {})
+        headers = dict(request.get("headers", {}))
         body = request.get("body")
 
         if not url:
             return "ERROR: No URL provided"
+
+        # v5.0: 서비스별 인증 자동 주입
+        if "api.stripe.com" in url:
+            headers.setdefault("Authorization", f"Bearer {os.getenv('STRIPE_API_KEY', '')}")
+        elif "api.lemonsqueezy.com" in url:
+            headers.setdefault("Authorization", f"Bearer {os.getenv('LEMONSQUEEZY_API_KEY', '')}")
+        elif "api.github.com" in url:
+            headers.setdefault("Authorization", f"token {os.getenv('GITHUB_TOKEN', '')}")
+        elif "api.gumroad.com" in url:
+            headers.setdefault("Authorization", f"Bearer {os.getenv('GUMROAD_ACCESS_TOKEN', '')}")
+        elif "localhost" in url or "127.0.0.1" in url:
+            headers.setdefault("Authorization", f"Bearer {os.getenv('REZE_API_KEY', '')}")
 
         try:
             timeout = aiohttp.ClientTimeout(total=30)
@@ -150,7 +170,17 @@ class ToolExecutor:
                             kwargs["data"] = str(body)
 
                 async with session.request(method, url, **kwargs) as resp:
-                    text = await resp.text()
+                    # v5.0: Content-Type에 따른 자동 파싱
+                    content_type = resp.headers.get("Content-Type", "")
+                    if "application/json" in content_type:
+                        try:
+                            data = await resp.json()
+                            text = json.dumps(data, ensure_ascii=False, indent=2)
+                        except:
+                            text = await resp.text()
+                    else:
+                        text = await resp.text()
+
                     truncated = text[:config.MAX_OBSERVATION_CHARS]
                     return f"HTTP {resp.status}\n{truncated}"
         except Exception as e:
@@ -223,3 +253,144 @@ class ToolExecutor:
                 break
 
         return f"ERROR: Web search failed — {last_error}"
+
+    # === v5.0: 신규 도구 ===
+
+    async def _exec_web_fetch(self, request: Any) -> str:
+        """URL에서 텍스트 콘텐츠 추출."""
+        import re as regex_module
+
+        if isinstance(request, str):
+            url = request
+        elif isinstance(request, dict):
+            url = request.get("url", "")
+        else:
+            return "ERROR: url 필요"
+
+        if not url.startswith(("http://", "https://")):
+            return "ERROR: http:// 또는 https:// URL 필요"
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; REZE-Agent/5.0)"
+                }) as resp:
+                    if resp.status != 200:
+                        return f"ERROR: HTTP {resp.status}"
+                    html = await resp.text()
+
+            # HTML → 텍스트 (간단한 태그 제거)
+            text = regex_module.sub(r'<script[^>]*>.*?</script>', '', html, flags=regex_module.DOTALL)
+            text = regex_module.sub(r'<style[^>]*>.*?</style>', '', text, flags=regex_module.DOTALL)
+            text = regex_module.sub(r'<[^>]+>', ' ', text)
+            text = regex_module.sub(r'\s+', ' ', text).strip()
+
+            return text[:5000]
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    def _exec_code_edit(self, request: Any) -> str:
+        """파일 읽기/수정/생성 도구."""
+        import os
+
+        if isinstance(request, str):
+            return "ERROR: dict 필요 {action, path, ...}"
+
+        action = request.get("action", "read")
+        path = request.get("path", "")
+
+        # 경로 보안 체크
+        real_path = os.path.realpath(path) if path else ""
+        ALLOWED_ROOTS = [
+            "/home/reze/reze-agent/",
+            "/home/reze/blogs/",
+            "/home/reze/projects/",
+            "/home/reze/ai-tools-lab/",
+            "/tmp/reze/"
+        ]
+        if not any(real_path.startswith(root) for root in ALLOWED_ROOTS):
+            return f"ERROR: 허용되지 않은 경로: {path}"
+
+        try:
+            if action == "read":
+                line_range = request.get("line_range")
+                with open(path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                if line_range:
+                    start, end = line_range
+                    lines = lines[max(0, start-1):end]
+                numbered = [f"{i+1}: {l}" for i, l in enumerate(lines, start=line_range[0] if line_range else 1)]
+                return "".join(numbered)[:5000]
+
+            elif action == "edit":
+                old_str = request.get("old_str", "")
+                new_str = request.get("new_str", "")
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if old_str not in content:
+                    return f"ERROR: old_str not found in {path}"
+                if content.count(old_str) > 1:
+                    return f"ERROR: old_str이 {content.count(old_str)}번 발견됨 (unique해야 함)"
+                content = content.replace(old_str, new_str, 1)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return f"OK: {path} 수정 완료"
+
+            elif action == "create":
+                file_content = request.get("content", "")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(file_content)
+                return f"OK: {path} 생성 완료 ({len(file_content)} bytes)"
+
+            elif action == "list":
+                import subprocess
+                result = subprocess.run(
+                    ["find", path, "-maxdepth", "2", "-type", "f"],
+                    capture_output=True, text=True, timeout=5
+                )
+                return result.stdout[:3000]
+
+            else:
+                return f"ERROR: unknown action: {action} (read/edit/create/list)"
+
+        except Exception as e:
+            return f"ERROR: {e}"
+
+    def get_tool_catalog(self) -> str:
+        """LLM에게 전달할 도구 카탈로그."""
+        return """사용 가능한 도구:
+
+1. shell: bash 명령어 실행
+   입력: 명령어 문자열
+   예: "docker ps --format '{{.Names}}:{{.Status}}'"
+   예: "pm2 jlist"
+   예: "free -m && df -h"
+   참고: 파이프(|)와 AND(&&) 사용 가능
+
+2. python: Python 코드 실행
+   입력: 코드 문자열
+   허용 import: json, re, math, datetime, collections, itertools, csv, pathlib, hashlib, base64, statistics, sqlite3, time, functools, random
+   예: "import json\\ndata = json.loads('{\"a\":1}')\\nprint(data)"
+
+3. http: HTTP 요청
+   입력: {"method": "GET/POST/PUT/DELETE", "url": "...", "headers": {}, "body": {}}
+   또는: URL 문자열 (GET)
+   인증 자동 주입: Stripe, LemonSqueezy, GitHub, localhost
+
+4. web_search: 웹 검색 (Tavily)
+   입력: 검색 쿼리 문자열
+   출력: 상위 5개 결과 (제목, URL, 요약)
+
+5. web_fetch: 웹페이지 텍스트 추출
+   입력: URL 문자열 또는 {"url": "..."}
+   출력: 페이지 텍스트 (최대 5000자)
+
+6. code_edit: 파일 읽기/수정/생성
+   입력: {"action": "read|edit|create|list", "path": "...", ...}
+   read: {"action": "read", "path": "파일경로", "line_range": [시작, 끝]}
+   edit: {"action": "edit", "path": "파일경로", "old_str": "찾을문자열", "new_str": "바꿀문자열"}
+   create: {"action": "create", "path": "파일경로", "content": "내용"}
+   list: {"action": "list", "path": "디렉토리경로"}
+   허용경로: /home/reze/reze-agent/, /home/reze/blogs/, /home/reze/projects/, /tmp/reze/"""

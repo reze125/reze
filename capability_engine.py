@@ -235,25 +235,33 @@ class Capability:
 
         return await self.engine.call_llm(prompt, role="execution")
 
+    async def _run_tool(self, tool: str, input_data: Any) -> str:
+        """v5.0: ToolExecutor를 통한 도구 실행."""
+        if hasattr(self.engine.tools, 'execute'):
+            return await self.engine.tools.execute(tool, input_data, source="capability")
+        return f"ERROR: ToolExecutor not available"
+
     # === COLLECT 역량 구현 ===
     async def _execute_collect(self, action: str, context: dict) -> Any:
         """데이터 수집 역량."""
-        tools = self.engine.tools
+        # v5.0: ToolExecutor.execute() 사용
 
-        # Tavily 검색
+        # 웹 검색
         if "search" in action.lower() or "조사" in action or "검색" in action:
-            if "tavily_search" in tools:
-                return await tools["tavily_search"](action)
+            return await self._run_tool("web_search", action)
 
         # Shell 실행 (docker, pm2 등)
-        if any(cmd in action.lower() for cmd in ["docker", "pm2", "df", "free", "ls"]):
-            if "shell_exec" in tools:
-                return await tools["shell_exec"](action)
+        if any(cmd in action.lower() for cmd in ["docker", "pm2", "df", "free", "ls", "curl"]):
+            return await self._run_tool("shell", action)
 
-        # API 호출
+        # 웹 페이지 가져오기
+        if "fetch" in action.lower() or "페이지" in action or "url" in action.lower():
+            url = context.get("url") if context else None
+            return await self._run_tool("web_fetch", url or action)
+
+        # HTTP API 호출
         if "api" in action.lower() or "http" in action.lower():
-            if "api_call" in tools:
-                return await tools["api_call"](action, context)
+            return await self._run_tool("http", context or action)
 
         # 기본: LLM에게 수집 방법 요청
         return await self._default_execute(action, context)
@@ -285,17 +293,18 @@ JSON 형식으로 응답:
     # === CREATE 역량 구현 ===
     async def _execute_create(self, action: str, context: dict) -> Any:
         """생성 역량."""
-        tools = self.engine.tools
+        # v5.0: code_edit 도구 사용
 
-        # 코드 생성
-        if "코드" in action or "code" in action.lower() or "스크립트" in action:
-            if "code_write" in tools:
-                return await tools["code_write"](action, context)
-
-        # 파일 생성
-        if "파일" in action or "file" in action.lower():
-            if "file_create" in tools:
-                return await tools["file_create"](action, context)
+        # 코드/파일 생성
+        if "코드" in action or "code" in action.lower() or "파일" in action or "file" in action.lower():
+            path = context.get("path") if context else None
+            content = context.get("content") if context else None
+            if path and content:
+                return await self._run_tool("code_edit", {
+                    "action": "create",
+                    "path": path,
+                    "content": content
+                })
 
         # 기본: LLM 생성
         prompt = f"""[생성 역량]
@@ -309,18 +318,22 @@ JSON 형식으로 응답:
     # === EXECUTE 역량 구현 ===
     async def _execute_execute(self, action: str, context: dict) -> Any:
         """실행 역량."""
-        tools = self.engine.tools
+        # v5.0: ToolExecutor 사용
 
         # Shell 명령
-        if "shell_exec" in tools:
-            # 명령어 추출 시도
-            if any(cmd in action.lower() for cmd in
-                   ["git", "docker", "pm2", "curl", "npm", "pip", "restart", "deploy"]):
-                return await tools["shell_exec"](action)
+        if any(cmd in action.lower() for cmd in
+               ["git", "docker", "pm2", "curl", "npm", "pip", "restart", "deploy", "systemctl"]):
+            return await self._run_tool("shell", action)
 
-        # API 호출
-        if "api_call" in tools and ("api" in action.lower() or "http" in action.lower()):
-            return await tools["api_call"](action, context)
+        # HTTP API 호출
+        if "api" in action.lower() or "http" in action.lower():
+            return await self._run_tool("http", context or action)
+
+        # Python 코드 실행
+        if "python" in action.lower() or "계산" in action:
+            code = context.get("code") if context else None
+            if code:
+                return await self._run_tool("python", code)
 
         # 기본: LLM에게 실행 계획 요청
         return await self._default_execute(action, context)
@@ -328,15 +341,21 @@ JSON 형식으로 응답:
     # === VERIFY 역량 구현 ===
     async def _execute_verify(self, action: str, context: dict) -> Any:
         """검증 역량."""
-        tools = self.engine.tools
+        # v5.0: ToolExecutor 사용
 
         # HTTP 헬스체크
-        if "http_check" in tools and ("health" in action.lower() or "200" in action):
-            return await tools["http_check"](action, context)
+        if "health" in action.lower() or "200" in action or "status" in action.lower():
+            url = context.get("url") if context else None
+            if url:
+                return await self._run_tool("http", url)
+            # shell로 헬스체크
+            return await self._run_tool("shell", action)
 
-        # 품질 게이트
-        if "quality_gate" in tools:
-            return await tools["quality_gate"](action, context)
+        # 파일 검증
+        if "file" in action.lower() or "파일" in action:
+            path = context.get("path") if context else None
+            if path:
+                return await self._run_tool("code_edit", {"action": "read", "path": path})
 
         # LLM 기반 검증
         prompt = f"""[검증 역량]
@@ -364,15 +383,22 @@ JSON 형식:
     # === COMMUNICATE 역량 구현 ===
     async def _execute_communicate(self, action: str, context: dict) -> Any:
         """소통 역량."""
-        tools = self.engine.tools
+        # v5.0: ToolExecutor 사용
 
-        # Discord 전송
-        if "discord_send" in tools and ("discord" in action.lower() or "알림" in action):
-            return await tools["discord_send"](action, context)
+        # Discord 전송 (webhook HTTP 호출)
+        if "discord" in action.lower() or "알림" in action:
+            # Discord는 engine의 discord_notify 함수 또는 http 도구 사용
+            if self.engine.discord_notify:
+                message = context.get("message", action) if context else action
+                try:
+                    await self.engine.discord_notify(message)
+                    return "Discord 알림 전송 완료"
+                except Exception as e:
+                    return f"Discord 전송 실패: {e}"
 
-        # 이메일 전송
-        if "email_send" in tools and ("email" in action.lower() or "이메일" in action):
-            return await tools["email_send"](action, context)
+        # HTTP API 알림 (슬랙, 웹훅 등)
+        if "webhook" in action.lower() or "http" in action.lower():
+            return await self._run_tool("http", context or action)
 
         # 리포트 생성
         prompt = f"""[소통 역량]
@@ -416,15 +442,15 @@ JSON 형식:
     # === LEARN 역량 구현 ===
     async def _execute_learn(self, action: str, context: dict) -> Any:
         """학습 역량."""
+        # v5.0: ToolExecutor 사용
+
         # 반성 저장
         if "반성" in action or "reflection" in action.lower():
             return await self._reflect(context)
 
-        # 리서치
-        if "조사" in action or "research" in action.lower():
-            tools = self.engine.tools
-            if "tavily_search" in tools:
-                return await tools["tavily_search"](action)
+        # 리서치 (웹 검색)
+        if "조사" in action or "research" in action.lower() or "검색" in action:
+            return await self._run_tool("web_search", action)
 
         # 경험 패턴화
         prompt = f"""[학습 역량]

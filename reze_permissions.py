@@ -22,11 +22,23 @@ class PermissionTier:
     CRITICAL = "critical"
 
 
-# === 체이닝 연산자 패턴 (v3.3 보안 핵심) ===
-# ;  |  ||  &&  `  $(  ${  > >> < << <( >( \n \r \x00
-CHAIN_OPERATORS = re.compile(
-    r';|\|{1,2}|&&|`|\$\(|\$\{|>{1,2}\s|<{1,2}\s|<\(|>\(|\x00|\n|\r'
+# === 체이닝 연산자 패턴 (v5.0: trusted source는 | && 허용) ===
+# 항상 차단: ; ` $() ${} > >> < << <( >( \n \r \x00
+STRICT_CHAIN_OPERATORS = re.compile(
+    r';|`|\$\(|\$\{|>{1,2}\s*/|<{1,2}\s|<\(|>\(|\x00|\n|\r'
 )
+# untrusted에서 추가 차단: | ||  &&
+PIPE_OPERATORS = re.compile(r'\|{1,2}|&&')
+
+# 위험 명령 블랙리스트 (항상 차단)
+DANGEROUS_COMMANDS = [
+    'rm -rf /', 'rm -rf /*', 'rm -rf ~',
+    'mkfs', 'dd if=', 'dd of=/',
+    ':(){ :|:& };:', 'chmod -R 777 /',
+    'chmod 777 /', '> /dev/sda', '> /dev/null',
+    'mv /* ', 'mv / ', 'wget | sh', 'curl | sh',
+    'wget | bash', 'curl | bash',
+]
 
 
 class PermissionSystem:
@@ -44,38 +56,59 @@ class PermissionSystem:
             return self._assess_filesystem(tool_input)
         elif tool == "web_search":
             return PermissionTier.AUTO_APPROVE
+        elif tool == "web_fetch":
+            return PermissionTier.AUTO_APPROVE  # v5.0: 웹페이지 읽기는 안전
+        elif tool == "code_edit":
+            return PermissionTier.STANDARD  # v5.0: 경로 체크는 도구 내부에서
         elif tool == "final_answer":
             return PermissionTier.AUTO_APPROVE
         return PermissionTier.STANDARD
 
+    # v5.0: 확장된 trusted sources
+    TRUSTED_SOURCES = (
+        "api", "schedule", "judgment", "autonomous_loop",
+        "self_healing", "agent_supervisor", "discovery",
+        "analyzer", "planner", "capability", "feedback"
+    )
+
     def _assess_shell(self, command: str, source: str) -> str:
-        """shell 명령 4단계 검사."""
+        """shell 명령 4단계 검사 (v5.0: trusted source는 파이프 허용)."""
         # Step 1: bash -c / sh -c 내부 추출
         payload = self._extract_shell_c_payload(command)
+        cmd_lower = payload.lower()
 
-        # Step 2: 체이닝 연산자 검사 — 있으면 무조건 DANGEROUS
-        if CHAIN_OPERATORS.search(payload):
-            logger.warning(f"DANGEROUS: chain operator in '{payload[:80]}'")
+        # Step 2: 위험 명령 블랙리스트 — 무조건 차단
+        for dangerous in DANGEROUS_COMMANDS:
+            if dangerous.lower() in cmd_lower:
+                logger.warning(f"CRITICAL: dangerous command '{dangerous}' in '{payload[:80]}'")
+                return PermissionTier.CRITICAL
+
+        # Step 3: 체이닝 연산자 검사
+        # 3a: 항상 차단되는 연산자 (; ` $() ${} > < 등)
+        if STRICT_CHAIN_OPERATORS.search(payload):
+            logger.warning(f"DANGEROUS: strict chain operator in '{payload[:80]}'")
             return PermissionTier.DANGEROUS
 
-        # Step 3a: 자동 승인 스크립트
+        # 3b: 파이프/AND 연산자는 trusted source만 허용
+        if PIPE_OPERATORS.search(payload):
+            if source not in self.TRUSTED_SOURCES:
+                logger.warning(f"DANGEROUS: pipe/and operator from untrusted source in '{payload[:80]}'")
+                return PermissionTier.DANGEROUS
+            # trusted source면 통과 (아래에서 STANDARD 반환)
+
+        # Step 4: 자동 승인 스크립트
         cmd_stripped = payload.strip()
         for approved in config.SHELL_AUTO_APPROVE:
             if cmd_stripped.startswith(approved):
                 return PermissionTier.AUTO_APPROVE
 
-        # Step 3b: 읽기 전용 화이트리스트
-        cmd_lower = cmd_stripped.lower()
+        # Step 5: 읽기 전용 화이트리스트
         for readonly in config.SHELL_READ_ONLY:
             if cmd_lower.startswith(readonly.lower()):
                 return PermissionTier.AUTO_APPROVE
 
-        # Step 4: source 기반 판단
-        TRUSTED_SOURCES = (
-            "api", "schedule", "judgment", "autonomous_loop",
-            "self_healing", "agent_supervisor"
-        )
-        if source in TRUSTED_SOURCES:
+        # Step 6: source 기반 판단
+        if source in self.TRUSTED_SOURCES:
             return PermissionTier.STANDARD
         return PermissionTier.CRITICAL
 
@@ -131,7 +164,18 @@ class SecurePythonREPL:
 
     기존 apex_final.py SecurePythonREPL(845-967줄) 기반.
     SAFE_MODE 항상 True (데몬이므로).
+    v5.0: whitelist import 허용.
     """
+
+    # v5.0: 허용된 import 목록
+    ALLOWED_IMPORTS = {
+        'json', 're', 'math', 'datetime', 'collections', 'itertools',
+        'csv', 'pathlib', 'hashlib', 'base64',
+        'statistics', 'textwrap', 'difflib', 'sqlite3',
+        'time', 'functools', 'operator', 'string', 'copy',
+        'random', 'decimal', 'fractions', 'numbers',
+        'html', 'xml', 'urllib', 'urllib.parse',
+    }
 
     FORBIDDEN_CALLS = {
         'eval', 'exec', 'compile', 'open',
@@ -148,7 +192,8 @@ class SecurePythonREPL:
         '__builtins__', '__import__', '__loader__', '__spec__',
     }
 
-    FORBIDDEN_NODES = {ast.Import, ast.ImportFrom}
+    # v5.0: FORBIDDEN_NODES에서 Import/ImportFrom 제거 (whitelist로 관리)
+    FORBIDDEN_NODES = set()
 
     def __init__(self, timeout: int = None):
         self.timeout = timeout or config.REPL_TIMEOUT
@@ -165,10 +210,48 @@ class SecurePythonREPL:
                 'pow': pow, 'divmod': divmod, 'hex': hex, 'oct': oct, 'bin': bin,
                 'chr': chr, 'ord': ord, 'repr': repr, 'ascii': ascii,
                 'format': format, 'slice': slice,
+                # v5.0: import 지원을 위한 __import__ 제한적 허용
+                '__import__': self._safe_import,
             }
         }
-        import math
+        # v5.0: 허용된 모듈 사전 로드
+        import math, json, re, datetime, collections, itertools
+        import csv, pathlib, hashlib, base64, statistics
+        import textwrap, difflib, sqlite3, time, functools
+        import operator, string, copy, random, decimal, html
         self.globals['math'] = math
+        self.globals['json'] = json
+        self.globals['re'] = re
+        self.globals['datetime'] = datetime
+        self.globals['collections'] = collections
+        self.globals['itertools'] = itertools
+        self.globals['csv'] = csv
+        self.globals['pathlib'] = pathlib
+        self.globals['hashlib'] = hashlib
+        self.globals['base64'] = base64
+        self.globals['statistics'] = statistics
+        self.globals['textwrap'] = textwrap
+        self.globals['difflib'] = difflib
+        self.globals['sqlite3'] = sqlite3
+        self.globals['time'] = time
+        self.globals['functools'] = functools
+        self.globals['operator'] = operator
+        self.globals['string'] = string
+        self.globals['copy'] = copy
+        self.globals['random'] = random
+        self.globals['decimal'] = decimal
+        self.globals['html'] = html
+
+    def _safe_import(self, name, *args, **kwargs):
+        """v5.0: whitelist import만 허용하는 __import__ 래퍼."""
+        module = name.split('.')[0]
+        if module not in self.ALLOWED_IMPORTS:
+            raise ImportError(f"Import '{name}' not allowed")
+        return __builtins__['__import__'](name, *args, **kwargs)
+
+    def run(self, code: str) -> str:
+        """execute의 별칭."""
+        return self.execute(code)
 
     def _validate_ast(self, code: str) -> Optional[str]:
         """AST 분석으로 코드 검증. 문제 있으면 에러 메시지 반환."""
@@ -178,9 +261,22 @@ class SecurePythonREPL:
             return f"Syntax error: {e}"
 
         for node in ast.walk(tree):
-            # 금지된 노드 타입 (import)
+            # 금지된 노드 타입
             if type(node) in self.FORBIDDEN_NODES:
                 return f"Forbidden: {type(node).__name__} not allowed"
+
+            # v5.0: import 검사 - whitelist 허용
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module = alias.name.split('.')[0]
+                    if module not in self.ALLOWED_IMPORTS:
+                        return f"Forbidden: import '{alias.name}' not allowed (whitelist: {', '.join(sorted(self.ALLOWED_IMPORTS)[:10])}...)"
+
+            if isinstance(node, ast.ImportFrom):
+                if node.module:
+                    module = node.module.split('.')[0]
+                    if module not in self.ALLOWED_IMPORTS:
+                        return f"Forbidden: from '{node.module}' import not allowed"
 
             # 함수 호출 검사
             if isinstance(node, ast.Call):
