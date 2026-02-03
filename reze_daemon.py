@@ -2,6 +2,11 @@
 import asyncio
 import time
 import json
+import re
+import subprocess
+import yaml
+from datetime import datetime
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -13,7 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import config
 from ssot import SSOT
-from reze_permissions import PermissionSystem
+from reze_permissions import PermissionSystem, BLOG_QUALITY_GATE, LOCK_ACTIONS, is_free
 from reze_tools import ToolExecutor
 from reze_core import REZECore, ModelRouter, CircuitBreaker
 from skills_manager import SkillsManager
@@ -308,6 +313,232 @@ async def self_review_job():
 
 
 # ============================================================
+# v3.3 신규 Jobs
+# ============================================================
+
+def _parse_skill_meta(skill_md: Path) -> dict:
+    """SKILL.md에서 YAML frontmatter 파싱."""
+    try:
+        content = skill_md.read_text()
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                return yaml.safe_load(parts[1]) or {}
+    except Exception:
+        pass
+    return {}
+
+
+async def skill_health_check_job():
+    """모든 스킬의 health_checks를 실행. 실패 시 자동수리."""
+    logger.info("Running skill health checks")
+    skills_dir = Path.home() / "reze-agent" / "skills"
+    total_checks = 0
+    total_pass = 0
+    total_fail = 0
+
+    for skill_dir in sorted(skills_dir.iterdir()):
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+
+        meta = _parse_skill_meta(skill_md)
+        if not meta.get("health_checks"):
+            continue
+
+        for check in meta["health_checks"]:
+            total_checks += 1
+            name = f"{skill_dir.name}/{check['name']}"
+
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", check["command"]],
+                    capture_output=True, text=True, timeout=30
+                )
+                output = result.stdout.strip()
+                ok = True
+
+                if check.get("expect"):
+                    ok = check["expect"] in output
+                elif check.get("verify_check"):
+                    try:
+                        ok = eval(check["verify_check"], {"output": output, "int": int, "float": float})
+                    except Exception:
+                        ok = False
+                if result.returncode != 0 and not check.get("verify_check"):
+                    ok = False
+
+            except subprocess.TimeoutExpired:
+                ok = False
+                output = "TIMEOUT"
+            except Exception as e:
+                ok = False
+                output = str(e)
+
+            if ok:
+                total_pass += 1
+                state.ssot.save_signal("health_ok", json.dumps({"check": name}))
+            else:
+                total_fail += 1
+                severity = check.get("severity", "warning")
+                state.ssot.save_signal("health_fail", json.dumps({
+                    "check": name, "output": output[:200], "severity": severity
+                }))
+
+                # 자동수리 시도
+                for fix in meta.get("fix_actions", []):
+                    if fix.get("trigger") and fix["trigger"] in check["name"]:
+                        logger.info(f"Auto-fix attempting: {fix['command'][:50]}")
+                        try:
+                            subprocess.run(
+                                ["bash", "-c", fix["command"]],
+                                capture_output=True, text=True, timeout=60
+                            )
+                            state.ssot.save_signal("auto_fix_success", json.dumps({
+                                "skill": skill_dir.name, "fix": fix["command"][:100]
+                            }))
+                        except Exception as e:
+                            logger.error(f"Auto-fix failed: {e}")
+                        break
+
+    logger.info(f"Skill health check: {total_pass}/{total_checks} passed, {total_fail} failed")
+
+
+async def daily_report_job():
+    """데일리 리포트 생성 → Discord 전송."""
+    logger.info("Generating daily report")
+    today = datetime.now(config.KST).strftime("%Y-%m-%d")
+
+    try:
+        # 오늘 데이터 수집
+        signals_today = state.ssot.get_signals_by_date(today)
+
+        blog_published = [s for s in signals_today if s["kind"] == "blog_published"]
+        blog_held = [s for s in signals_today if s["kind"] == "blog_held"]
+        auto_fixes = [s for s in signals_today if s["kind"] == "auto_fix_success"]
+        health_fails = [s for s in signals_today if s["kind"] == "health_fail"]
+        evolutions = [s for s in signals_today if s["kind"] == "self_evolution_success"]
+        approvals = [s for s in signals_today if s["kind"] == "approval_request"]
+
+        # 리소스
+        disk_result = subprocess.run(
+            ["bash", "-c", "df / --output=pcent | tail -1 | tr -d ' %'"],
+            capture_output=True, text=True
+        )
+        disk = disk_result.stdout.strip() + "%" if disk_result.returncode == 0 else "?"
+
+        mem_result = subprocess.run(
+            ["bash", "-c", "free | grep Mem | awk '{printf \"%.0f\", $3/$2*100}'"],
+            capture_output=True, text=True
+        )
+        memory = mem_result.stdout.strip() + "%" if mem_result.returncode == 0 else "?"
+
+        tokens = state.ssot.get_daily_tokens()
+
+        report = f"""REZE 데일리 리포트 - {today}
+
+오늘 한 일 (FREE)
+"""
+
+        if blog_published:
+            for b in blog_published:
+                try:
+                    p = json.loads(b.get("data", "{}"))
+                    report += f"  발행: \"{p.get('title', '?')}\" (점수: {p.get('score', '?')})\n"
+                except:
+                    pass
+
+        if blog_held:
+            for b in blog_held:
+                try:
+                    p = json.loads(b.get("data", "{}"))
+                    report += f"  보류: \"{p.get('title', '?')}\" (품질 미달)\n"
+                except:
+                    pass
+
+        if auto_fixes:
+            for f in auto_fixes:
+                try:
+                    p = json.loads(f.get("data", "{}"))
+                    report += f"  자동수리: {p.get('skill', '?')}\n"
+                except:
+                    pass
+
+        if evolutions:
+            for e in evolutions:
+                try:
+                    p = json.loads(e.get("data", "{}"))
+                    report += f"  자기진화: {p.get('tech', '?')}\n"
+                except:
+                    pass
+
+        if not (blog_published or blog_held or auto_fixes or evolutions):
+            report += "  (특별한 작업 없음)\n"
+
+        healthy_count = len(SAAS_HEALTH_ENDPOINTS) - len([h for h in health_fails])
+        report += f"""
+서비스: {healthy_count}/{len(SAAS_HEALTH_ENDPOINTS)} 정상
+
+리소스
+  토큰: {tokens:,} / 500,000
+  디스크: {disk}
+  메모리: {memory}
+"""
+
+        if approvals:
+            report += "\n승인 대기 (LOCK)\n"
+            for a in approvals:
+                try:
+                    p = json.loads(a.get("data", "{}"))
+                    report += f"  {p.get('action', '?')}: {p.get('reason', '?')}\n"
+                except:
+                    pass
+        else:
+            report += "\n승인 대기 (LOCK): 없음\n"
+
+        # Discord 전송
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                config.DISCORD_WEBHOOK_DAILY,
+                json={"content": report[:2000]}
+            )
+
+        # SSOT에 기록
+        state.ssot.save_signal("daily_report", json.dumps({"date": today}))
+        logger.info("Daily report sent")
+
+    except Exception as e:
+        logger.error(f"Daily report failed: {e}")
+
+
+async def request_approval(action: str, reason: str, analysis: str = ""):
+    """LOCK 행동 시 Discord로 승인 요청."""
+    msg = (
+        f"REZE 승인 요청\n\n"
+        f"행동: {action}\n"
+        f"이유: {reason}\n"
+    )
+    if analysis:
+        msg += f"분석: {analysis[:500]}\n"
+    msg += "\n-> 승인 / 거절 / 수정"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                config.DISCORD_WEBHOOK_ALERT,
+                json={"content": msg[:2000]}
+            )
+        state.ssot.save_signal("approval_request", json.dumps({
+            "action": action, "reason": reason, "status": "pending"
+        }))
+        logger.info(f"Approval requested: {action}")
+    except Exception as e:
+        logger.error(f"Approval request failed: {e}")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
@@ -330,7 +561,7 @@ async def lifespan(app: FastAPI):
 
     # v3.3 신규 모듈
     state.self_healing = SelfHealing(
-        state.tools, state.ssot, state.router, dry_run=True  # 2주 관찰 후 False
+        state.tools, state.ssot, state.router, dry_run=False  # 자동수리 활성화
     )
     state.alert_manager = AlertManager(state.ssot)
     state.biz_tracker = BizTracker(state.ssot)  # LS API key는 추후 설정
@@ -346,8 +577,10 @@ async def lifespan(app: FastAPI):
         state.biz_tracker.collect, "interval", hours=6, id="biz_check"
     )
     state.scheduler.add_job(
-        state.alert_manager.generate_daily_report,
-        "cron", hour=6, minute=0, id="daily_report"
+        skill_health_check_job, "interval", hours=1, id="skill_health_check"
+    )
+    state.scheduler.add_job(
+        daily_report_job, "cron", hour=21, minute=0, id="daily_report_discord"
     )
 
     state.scheduler.start()

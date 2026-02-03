@@ -1,10 +1,27 @@
 ---
 name: postpilot
 description: PostPilot AI 블로그 자동화 SaaS 관리 (backend:8000, frontend:3000)
+type: service
 triggers:
   - postpilot
   - 포스트파일럿
   - blog automation saas
+health_checks:
+  - name: backend_health
+    command: "curl -sf http://localhost:8000/health -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+  - name: frontend_health
+    command: "curl -sf http://localhost:3000 -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+fix_actions:
+  - trigger: "backend_health"
+    command: "pm2 restart postpilot-backend"
+    verify: "sleep 5 && curl -sf http://localhost:8000/health -o /dev/null && echo OK"
+  - trigger: "frontend_health"
+    command: "pm2 restart postpilot-frontend"
+    verify: "sleep 5 && curl -sf http://localhost:3000 -o /dev/null && echo OK"
 ---
 # PostPilot
 

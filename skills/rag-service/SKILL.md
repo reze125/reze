@@ -1,11 +1,28 @@
 ---
 name: rag-service
 description: RAG-as-a-Service (port 8020, Qdrant vector DB)
+type: service
 triggers:
   - rag-service
   - rag
   - 벡터
   - vector search
+health_checks:
+  - name: api_health
+    command: "curl -sf http://localhost:8020/health -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+  - name: qdrant_health
+    command: "curl -sf http://localhost:6333/collections -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+fix_actions:
+  - trigger: "api_health"
+    command: "pm2 restart rag-service"
+    verify: "sleep 5 && curl -sf http://localhost:8020/health -o /dev/null && echo OK"
+  - trigger: "qdrant_health"
+    command: "docker restart qdrant"
+    verify: "sleep 10 && curl -sf http://localhost:6333/collections -o /dev/null && echo OK"
 ---
 # RAG-Service
 

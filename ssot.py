@@ -134,6 +134,45 @@ class SSOT:
             metadata TEXT,
             measured_at TEXT NOT NULL
         );
+
+        -- v3.3 인덱스 추가
+        CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
+        CREATE INDEX IF NOT EXISTS idx_signals_kind ON signals(kind);
+
+        -- v3.3 discoveries: 발견 기록
+        CREATE TABLE IF NOT EXISTS discoveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discovery_type TEXT NOT NULL,
+            source_skill TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            interpretation TEXT,
+            affected_services TEXT,
+            impact_level TEXT,
+            actions_taken TEXT,
+            verification_date TEXT,
+            verification_result TEXT,
+            status TEXT DEFAULT 'new',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_discoveries_status ON discoveries(status);
+
+        -- v3.3 evolutions: 자기 진화 기록
+        CREATE TABLE IF NOT EXISTS evolutions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tech_name TEXT NOT NULL,
+            tech_description TEXT,
+            source TEXT,
+            autonomy_level TEXT,
+            status TEXT DEFAULT 'evaluated',
+            git_backup_tag TEXT,
+            changes TEXT,
+            test_results TEXT,
+            performance_before TEXT,
+            performance_after TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
         """)
         self.conn.commit()
 
@@ -394,6 +433,86 @@ class SSOT:
             (metric_type, metric_name, value, unit, metadata, self._kst_now())
         )
         self.conn.commit()
+
+    # === v3.3 Signal Helpers ===
+    def count_signals(self, kind: str, date_prefix: str = None) -> int:
+        """특정 kind의 signal 수 카운트."""
+        if date_prefix:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE kind=? AND created_at LIKE ?",
+                (kind, f"{date_prefix}%")
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM signals WHERE kind=?", (kind,)
+            ).fetchone()
+        return row[0] if row else 0
+
+    def get_signals_by_date(self, date: str) -> list[dict]:
+        """특정 날짜의 모든 signal 조회."""
+        rows = self.conn.execute(
+            "SELECT * FROM signals WHERE created_at LIKE ? ORDER BY created_at",
+            (f"{date}%",)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # === v3.3 Discoveries ===
+    def save_discovery(self, discovery_type: str, source_skill: str, detail: str,
+                       interpretation: str = None, affected_services: str = None,
+                       impact_level: str = "medium") -> int:
+        """발견 기록 저장."""
+        cur = self.conn.execute(
+            "INSERT INTO discoveries(discovery_type, source_skill, detail, "
+            "interpretation, affected_services, impact_level) VALUES(?,?,?,?,?,?)",
+            (discovery_type, source_skill, detail, interpretation, affected_services, impact_level)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_pending_discoveries(self) -> list[dict]:
+        """처리 대기 중인 발견 목록."""
+        rows = self.conn.execute(
+            "SELECT * FROM discoveries WHERE status IN ('new', 'processing') ORDER BY created_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_discovery_status(self, discovery_id: int, status: str, actions_taken: str = None) -> None:
+        """발견 상태 업데이트."""
+        self.conn.execute(
+            "UPDATE discoveries SET status=?, actions_taken=?, updated_at=datetime('now') WHERE id=?",
+            (status, actions_taken, discovery_id)
+        )
+        self.conn.commit()
+
+    # === v3.3 Evolutions ===
+    def save_evolution(self, tech_name: str, tech_description: str = None,
+                       source: str = None, git_backup_tag: str = None) -> int:
+        """진화 시도 기록."""
+        cur = self.conn.execute(
+            "INSERT INTO evolutions(tech_name, tech_description, source, git_backup_tag) VALUES(?,?,?,?)",
+            (tech_name, tech_description, source, git_backup_tag)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def complete_evolution(self, evolution_id: int, status: str,
+                           changes: str = None, test_results: str = None) -> None:
+        """진화 완료 기록."""
+        self.conn.execute(
+            "UPDATE evolutions SET status=?, changes=?, test_results=?, "
+            "completed_at=datetime('now') WHERE id=?",
+            (status, changes, test_results, evolution_id)
+        )
+        self.conn.commit()
+
+    def count_daily_evolutions(self) -> int:
+        """오늘 진화 횟수."""
+        today = self._kst_date()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM evolutions WHERE created_at LIKE ? AND status='success'",
+            (f"{today}%",)
+        ).fetchone()
+        return row[0] if row else 0
 
     # === 리소스 관리 ===
     def close(self) -> None:

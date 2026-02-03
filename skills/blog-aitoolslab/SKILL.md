@@ -1,6 +1,7 @@
 ---
 name: blog-aitoolslab
 description: AI Tools Lab 블로그 발행 — articles 테이블에 글 INSERT (PostgreSQL)
+type: blog
 triggers:
   - 블로그
   - blog
@@ -23,6 +24,22 @@ triggers:
   - listicle
   - 디스커버리
   - discovery
+health_checks:
+  - name: blog_site
+    command: "curl -sf http://localhost:3005 -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+  - name: blog_db
+    command: "docker exec quotepilot-db psql -U quotepilot -d aitoolslab -c 'SELECT 1' > /dev/null 2>&1 && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+fix_actions:
+  - trigger: "blog_site"
+    command: "pm2 restart ai-tools-lab"
+    verify: "sleep 10 && curl -sf http://localhost:3005 -o /dev/null && echo OK"
+  - trigger: "blog_db"
+    command: "docker restart quotepilot-db"
+    verify: "sleep 10 && docker exec quotepilot-db pg_isready -U postgres && echo OK"
 ---
 
 # AI Tools Lab Blog

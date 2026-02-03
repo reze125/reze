@@ -1,6 +1,7 @@
 ---
 name: server-management
 description: 서버 인프라 관리 — Docker 컨테이너, PM2 프로세스, 시스템 리소스 모니터링
+type: infra
 triggers:
   - 서버
   - server
@@ -22,6 +23,23 @@ triggers:
   - port
   - 로그
   - log
+health_checks:
+  - name: disk_usage
+    command: "df / --output=pcent | tail -1 | tr -d ' %'"
+    verify_check: "int(output) < 85"
+    severity: warning
+  - name: memory_usage
+    command: "free | grep Mem | awk '{printf \"%.0f\", $3/$2*100}'"
+    verify_check: "int(output) < 90"
+    severity: warning
+  - name: pm2_running
+    command: "pm2 list --no-color | grep -c online"
+    verify_check: "int(output) >= 5"
+    severity: critical
+fix_actions:
+  - trigger: "disk_usage"
+    command: "docker system prune -f --volumes 2>/dev/null; find /tmp -type f -mtime +7 -delete 2>/dev/null; echo done"
+    verify: "df / --output=pcent | tail -1 | tr -d ' %'"
 ---
 
 # Server Management

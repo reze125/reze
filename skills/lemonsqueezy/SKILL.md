@@ -1,6 +1,7 @@
 ---
 name: lemonsqueezy
 description: LemonSqueezy API — 매출 조회, 주문 관리, 구독 확인
+type: biz
 triggers:
   - 매출
   - 수익
@@ -13,6 +14,12 @@ triggers:
   - subscription
   - 결제
   - payment
+health_checks:
+  - name: api_reachable
+    command: "curl -sf https://api.lemonsqueezy.com -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: info
+fix_actions: []
 ---
 
 # LemonSqueezy API

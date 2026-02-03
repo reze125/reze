@@ -1,6 +1,7 @@
 ---
 name: docker-infra
 description: Docker 인프라 관리 (21 컨테이너)
+type: infra
 triggers:
   - docker
   - 컨테이너
@@ -10,6 +11,33 @@ triggers:
   - flowise
   - listmonk
   - paintingan
+health_checks:
+  - name: docker_daemon
+    command: "docker info > /dev/null 2>&1 && echo OK || echo FAIL"
+    expect: "OK"
+    severity: critical
+  - name: n8n_health
+    command: "curl -sf http://localhost:5678 -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: warning
+  - name: dify_health
+    command: "curl -sf http://localhost:3001 -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: warning
+  - name: qdrant_health
+    command: "curl -sf http://localhost:6333/collections -o /dev/null && echo OK || echo FAIL"
+    expect: "OK"
+    severity: warning
+fix_actions:
+  - trigger: "n8n_health"
+    command: "docker restart n8n"
+    verify: "sleep 10 && curl -sf http://localhost:5678 -o /dev/null && echo OK"
+  - trigger: "dify_health"
+    command: "docker restart dify-api dify-web"
+    verify: "sleep 15 && curl -sf http://localhost:3001 -o /dev/null && echo OK"
+  - trigger: "qdrant_health"
+    command: "docker restart qdrant"
+    verify: "sleep 10 && curl -sf http://localhost:6333/collections -o /dev/null && echo OK"
 ---
 # Docker Infrastructure (21 containers)
 

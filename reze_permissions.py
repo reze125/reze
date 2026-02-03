@@ -305,3 +305,136 @@ class FilesystemTool:
             return f"[{target}]\n" + "\n".join(items[:100])
         except Exception as e:
             return f"ERROR: {e}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 자율 정책 (이 섹션은 REZE가 수정 불가 — FORBIDDEN)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# === LOCK 행동 목록 ===
+# FREE: 이 목록에 없는 모든 행동
+# LOCK: 이 목록에 있는 행동 (주인 승인 필요)
+
+LOCK_ACTIONS = frozenset({
+    # 돈 관련 (되돌릴 수 없음)
+    "price_change",
+    "paid_api_subscribe",
+    "refund_process",
+    "server_plan_change",
+
+    # 보안 관련 (뚫리면 끝)
+    "env_modify",
+    "credentials_modify",
+    "permissions_critical_change",
+    "firewall_change",
+    "ssh_change",
+
+    # 데이터 파괴 (복구 불가)
+    "db_drop",
+    "db_mass_delete",
+    "project_dir_delete",
+    "backup_delete",
+    "git_force_push",
+
+    # 외부 공개 (되돌릴 수 없음)
+    "domain_purchase",
+    "external_account_create",
+    "email_send",
+    "external_post",
+})
+
+
+def is_free(action_type: str) -> bool:
+    """LOCK이 아닌 모든 행동은 FREE. 이 함수는 수정 불가."""
+    return action_type not in LOCK_ACTIONS
+
+
+# === 자기 수정 화이트리스트 ===
+# REZE가 수정할 수 있는 파일 (이 목록 자체는 수정 불가)
+
+SELF_MODIFIABLE_FILES = [
+    "skills/*/SKILL.md",
+    "config.py",
+    "prompts/*.py",
+    "utils/*.py",
+    "docs/*",
+    "reze_daemon.py",
+    "reze_tools.py",
+    "ssot.py",
+    "skills_manager.py",
+    "reze_alert.py",
+    "reze_biz.py",
+    "reze_core.py",
+    "reze_self_healing.py",
+    "moltbook_bot.py",
+    "self_evolution.py",
+]
+
+FORBIDDEN_FILES = [
+    ".env",
+    "credentials.json",
+    "reze_permissions.py",   # 이 파일 자체
+]
+
+
+# === 자원 제한 ===
+MAX_DAILY_EVOLUTIONS = 5
+MAX_DAILY_BLOG_POSTS = 2
+MAX_DAILY_TOKEN_BUDGET = 500_000
+
+
+# === 블로그 품질 게이트 ===
+BLOG_QUALITY_GATE = {
+    # 1단계: 객관적 하드체크 (조작 불가)
+    "hard_checks": {
+        "min_words": 2500,
+        "min_headings_h2": 7,
+        "min_paragraphs": 15,
+        "has_comparison_table": True,
+        "has_pros_cons": True,
+        "has_pricing_info": True,
+        "has_internal_links": 2,
+        "no_ai_phrases": [
+            "as an AI",
+            "I cannot",
+            "it's important to note",
+            "in today's fast-paced world",
+            "in conclusion,",
+            "dive into",
+            "delve into",
+            "game-changer",
+            "revolutionize",
+            "leverage",
+        ],
+    },
+    # 2단계: 크로스 리뷰 (다른 LLM이 채점)
+    "cross_review": {
+        "writer": "gemini",
+        "reviewer": "groq",
+        "min_score": 85,
+        "max_retries": 3,
+    },
+    # 채점 프롬프트
+    "review_prompt": """
+        이 블로그 글을 TechRadar, Zapier Blog 수준과 비교하라.
+
+        채점 기준 (각 20점, 총 100점):
+        1. 실사용 경험 느낌: 직접 써본 것처럼 구체적인가?
+           (스크린샷 설명, 구체적 사용 시나리오, 실제 수치)
+        2. 정보 밀도: 읽고 나서 바로 결정할 수 있는가?
+           (가격, 기능 비교표, 명확한 추천)
+        3. 독창성: 다른 AI 글과 구별되는가?
+           (고유한 관점, 예상 못한 비교, 실제 팁)
+        4. 구조: 훑어보기만 해도 핵심이 잡히는가?
+           (명확한 H2, 비교표, TL;DR, 요약)
+        5. SEO 자연스러움: 키워드가 억지로 들어간 느낌 없는가?
+
+        85점 미만이면 구체적으로 어디가 약한지 지적하라.
+        점수 부풀리지 마. 엄격하게.
+
+        응답 형식:
+        SCORE: {점수}
+        WEAK: {약한 부분}
+        FIX: {구체적 수정 방법}
+    """,
+}
