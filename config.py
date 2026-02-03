@@ -63,6 +63,9 @@ DAILY_TOKEN_BUDGET = 500_000
 REPL_TIMEOUT = 10   # seconds
 SHELL_TIMEOUT = 30  # seconds
 
+# === REZE 페르소나 ===
+REZE_OWNER_TITLE = "보스"  # 오너 호칭 (형 → 보스)
+
 # === Truncation ===
 MAX_OBSERVATION_TOKENS = 1500
 MAX_OBSERVATION_CHARS = int(MAX_OBSERVATION_TOKENS * 3.5)

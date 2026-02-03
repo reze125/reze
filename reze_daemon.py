@@ -5,7 +5,7 @@ import json
 import re
 import subprocess
 import yaml
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -539,6 +539,501 @@ async def request_approval(action: str, reason: str, analysis: str = ""):
 
 
 # ============================================================
+# Phase 2: Discovery Pipeline & Research Jobs
+# ============================================================
+
+async def process_discovery(discovery_type: str, source_skill: str, detail: dict) -> int:
+    """
+    발견 처리 파이프라인: Detect → Interpret → Connect → Act → Verify
+
+    Returns: discovery_id from SSOT
+    """
+    logger.info(f"Processing discovery: {discovery_type} from {source_skill}")
+
+    # 1. Save discovery to SSOT
+    discovery_id = state.ssot.save_discovery(
+        discovery_type=discovery_type,
+        source_skill=source_skill,
+        detail=json.dumps(detail, ensure_ascii=False),
+        urgency=detail.get("urgency", "medium")
+    )
+
+    # 2. Interpret & Connect using CONNECTION_MAP
+    connection = config.CONNECTION_MAP.get(discovery_type)
+    if not connection:
+        logger.warning(f"No connection map for: {discovery_type}")
+        return discovery_id
+
+    affects = connection.get("affects", [])
+    actions = connection.get("actions", [])
+    urgency = connection.get("urgency", "medium")
+
+    # 3. Generate actions based on urgency
+    if urgency == "critical":
+        # 즉시 행동 생성
+        for action in actions[:2]:
+            task_spec = f"[{discovery_type}] {action}: {detail.get('summary', str(detail)[:100])}"
+            task_id = state.ssot.enqueue(task_spec, priority=1, source="discovery")
+            logger.info(f"Critical discovery → task: {task_id}")
+
+    elif urgency == "high":
+        # 우선순위 높은 태스크 생성
+        task_spec = f"[{discovery_type}] 분석 및 대응: {detail.get('summary', str(detail)[:100])}"
+        task_id = state.ssot.enqueue(task_spec, priority=2, source="discovery")
+        logger.info(f"High urgency discovery → task: {task_id}")
+
+    elif urgency == "medium":
+        # 일반 큐에 추가
+        task_spec = f"[{discovery_type}] 검토: {detail.get('summary', str(detail)[:100])}"
+        task_id = state.ssot.enqueue(task_spec, priority=3, source="discovery")
+
+    # low urgency: 기록만, 주간 전략에서 처리
+
+    # 4. Alert if critical/high
+    if urgency in ("critical", "high") and state.alert_manager:
+        severity = "critical" if urgency == "critical" else "warning"
+        await state.alert_manager.send(
+            severity, discovery_type,
+            f"발견: {detail.get('summary', str(detail)[:200])}"
+        )
+
+    # 5. Record connection for later analysis
+    state.ssot.save_signal("discovery_connected", json.dumps({
+        "discovery_id": discovery_id,
+        "type": discovery_type,
+        "affects": affects,
+        "actions_generated": actions[:2] if urgency in ("critical", "high") else []
+    }))
+
+    return discovery_id
+
+
+async def trend_scan_job():
+    """매일 08:00: AI/노코드 트렌드 스캔."""
+    logger.info("Running trend scan")
+
+    try:
+        # 트렌드 소스 목록
+        sources = [
+            {"name": "Product Hunt", "url": "https://www.producthunt.com/topics/artificial-intelligence"},
+            {"name": "Hacker News", "url": "https://news.ycombinator.com/"},
+            {"name": "AI Tools Directory", "url": "https://www.futuretools.io/"},
+        ]
+
+        discoveries = []
+
+        for source in sources:
+            try:
+                # LLM에게 트렌드 분석 요청
+                response = await state.router.call(
+                    "fast",
+                    [{
+                        "role": "user",
+                        "content": (
+                            f"다음 사이트에서 주목할 AI/노코드 도구 트렌드를 분석해라: {source['name']}\n\n"
+                            f"1. 새로운 도구가 있으면 JSON으로 보고:\n"
+                            f'{{"type": "new_tool_discovered", "tool_name": "...", "category": "...", "summary": "..."}}\n\n'
+                            f"2. 없으면 빈 객체 {{}}\n\n"
+                            f"JSON만 반환."
+                        )
+                    }],
+                    system="AI 도구 트렌드 분석가. 새롭고 주목할만한 도구만 보고한다."
+                )
+
+                text = response.text.strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+
+                try:
+                    result = json.loads(text)
+                    if result and result.get("type"):
+                        discoveries.append(result)
+                except json.JSONDecodeError:
+                    pass
+
+            except Exception as e:
+                logger.warning(f"Trend scan failed for {source['name']}: {e}")
+
+        # 발견 처리
+        for d in discoveries:
+            await process_discovery(
+                d.get("type", "new_tool_discovered"),
+                "trend_scan",
+                d
+            )
+
+        state.ssot.save_signal("trend_scan_complete", json.dumps({
+            "discoveries": len(discoveries),
+            "sources_checked": len(sources)
+        }))
+
+        logger.info(f"Trend scan complete: {len(discoveries)} discoveries")
+
+    except Exception as e:
+        logger.error(f"Trend scan failed: {e}")
+
+
+async def competitor_check_job():
+    """매주 월요일 09:00: 경쟁사 모니터링."""
+    logger.info("Running competitor check")
+
+    try:
+        # 모니터링 대상
+        competitors = {
+            "postpilot": ["buffer.com", "hootsuite.com", "later.com"],
+            "quotepilot": ["quotefancy.com", "brainyquote.com"],
+            "browserpilot": ["browse.ai", "bardeen.ai", "axiom.ai"],
+        }
+
+        discoveries = []
+
+        for product, comp_list in competitors.items():
+            for comp in comp_list:
+                try:
+                    response = await state.router.call(
+                        "fast",
+                        [{
+                            "role": "user",
+                            "content": (
+                                f"{comp}의 최근 변화를 분석해라:\n"
+                                f"- 가격 변동\n"
+                                f"- 새 기능\n"
+                                f"- 중요 공지\n\n"
+                                f"변화가 있으면 JSON:\n"
+                                f'{{"type": "competitor_price_change" 또는 "competitor_new_feature", '
+                                f'"competitor": "{comp}", "product": "{product}", "summary": "..."}}\n\n'
+                                f"없으면 {{}}"
+                            )
+                        }],
+                        system="경쟁사 분석가. 중요한 변화만 보고한다."
+                    )
+
+                    text = response.text.strip()
+                    text = text.replace("```json", "").replace("```", "").strip()
+
+                    try:
+                        result = json.loads(text)
+                        if result and result.get("type"):
+                            discoveries.append(result)
+                    except json.JSONDecodeError:
+                        pass
+
+                except Exception as e:
+                    logger.warning(f"Competitor check failed for {comp}: {e}")
+
+        for d in discoveries:
+            await process_discovery(d.get("type"), "competitor_check", d)
+
+        state.ssot.save_signal("competitor_check_complete", json.dumps({
+            "discoveries": len(discoveries)
+        }))
+
+        logger.info(f"Competitor check complete: {len(discoveries)} discoveries")
+
+    except Exception as e:
+        logger.error(f"Competitor check failed: {e}")
+
+
+async def keyword_scan_job():
+    """매주 수요일 09:00: 키워드 기회 발굴."""
+    logger.info("Running keyword scan")
+
+    try:
+        # 타겟 니치
+        niches = [
+            "ai tools for small business",
+            "nocode automation tools",
+            "ai writing assistant",
+            "browser automation",
+            "social media scheduling",
+        ]
+
+        discoveries = []
+
+        for niche in niches:
+            try:
+                response = await state.router.call(
+                    "fast",
+                    [{
+                        "role": "user",
+                        "content": (
+                            f"'{niche}' 관련 블로그 키워드 기회를 분석해라:\n"
+                            f"- 검색량이 있지만 경쟁이 낮은 롱테일 키워드\n"
+                            f"- 최근 트렌드 키워드\n\n"
+                            f"기회가 있으면 JSON:\n"
+                            f'{{"type": "keyword_opportunity", "keyword": "...", '
+                            f'"estimated_difficulty": "low/medium/high", "summary": "..."}}\n\n'
+                            f"없으면 {{}}"
+                        )
+                    }],
+                    system="SEO 키워드 분석가. 실제 기회만 보고한다."
+                )
+
+                text = response.text.strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+
+                try:
+                    result = json.loads(text)
+                    if result and result.get("type"):
+                        discoveries.append(result)
+                except json.JSONDecodeError:
+                    pass
+
+            except Exception as e:
+                logger.warning(f"Keyword scan failed for {niche}: {e}")
+
+        for d in discoveries:
+            await process_discovery("keyword_opportunity", "keyword_scan", d)
+
+        state.ssot.save_signal("keyword_scan_complete", json.dumps({
+            "discoveries": len(discoveries)
+        }))
+
+        logger.info(f"Keyword scan complete: {len(discoveries)} discoveries")
+
+    except Exception as e:
+        logger.error(f"Keyword scan failed: {e}")
+
+
+async def strategic_thinking_job():
+    """매주 일요일 20:00: 주간 회고 + 다음 주 전략."""
+    logger.info("Running strategic thinking")
+
+    try:
+        # 이번 주 데이터 수집
+        today = datetime.now(config.KST)
+        week_start = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        # 주간 신호 수집
+        signals = state.ssot.get_recent_signals(hours=168)  # 7일
+
+        # 분류
+        discoveries = [s for s in signals if s["kind"].startswith("discovery")]
+        blog_published = [s for s in signals if s["kind"] == "blog_published"]
+        auto_fixes = [s for s in signals if s["kind"] == "auto_fix_success"]
+        health_fails = [s for s in signals if s["kind"] == "health_fail"]
+
+        # LLM에게 전략 분석 요청
+        response = await state.router.call(
+            "reasoning",
+            [{
+                "role": "user",
+                "content": (
+                    f"REZE 주간 전략 회의.\n\n"
+                    f"이번 주 실적:\n"
+                    f"- 블로그 발행: {len(blog_published)}개\n"
+                    f"- 자동 수리: {len(auto_fixes)}회\n"
+                    f"- 장애: {len(health_fails)}건\n"
+                    f"- 발견: {len(discoveries)}건\n\n"
+                    f"비즈니스 목표: 월 $3,100~$9,500 수익\n\n"
+                    f"다음 JSON 형식으로 분석 제공:\n"
+                    f'{{\n'
+                    f'  "retrospective": {{"biggest_win": "...", "biggest_issue": "..."}},\n'
+                    f'  "opportunities": ["..."],\n'
+                    f'  "risks": ["..."],\n'
+                    f'  "next_week_priorities": [\n'
+                    f'    {{"rank": 1, "goal": "...", "actions": ["..."], "expected_outcome": "..."}}\n'
+                    f'  ],\n'
+                    f'  "lessons": ["..."]\n'
+                    f'}}\n\n'
+                    f"JSON만 반환."
+                )
+            }],
+            system="비즈니스 전략가. 데이터 기반 의사결정."
+        )
+
+        text = response.text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        try:
+            strategy = json.loads(text)
+
+            # 우선순위 행동 → 태스크 큐
+            for p in strategy.get("next_week_priorities", [])[:3]:
+                for action in p.get("actions", [])[:2]:
+                    task_id = state.ssot.enqueue(
+                        f"[전략] {action}",
+                        priority=p.get("rank", 3),
+                        source="strategy"
+                    )
+                    logger.info(f"Strategy task created: {task_id}")
+
+            # 교훈 → 신호 저장
+            for lesson in strategy.get("lessons", []):
+                state.ssot.save_signal("lesson_learned", lesson)
+
+            state.ssot.save_signal("weekly_strategy", json.dumps(strategy))
+
+        except json.JSONDecodeError:
+            logger.warning(f"Strategy parse failed: {text[:200]}")
+
+        logger.info("Strategic thinking complete")
+
+    except Exception as e:
+        logger.error(f"Strategic thinking failed: {e}")
+
+
+async def weekly_report_job():
+    """매주 일요일 21:00: 주간 리포트 → Discord."""
+    logger.info("Generating weekly report")
+
+    try:
+        today = datetime.now(config.KST)
+        week_start = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        # 주간 데이터
+        signals = state.ssot.get_recent_signals(hours=168)
+
+        blog_published = len([s for s in signals if s["kind"] == "blog_published"])
+        discoveries = len([s for s in signals if s["kind"].startswith("discovery")])
+        auto_fixes = len([s for s in signals if s["kind"] == "auto_fix_success"])
+        tasks_completed = len(state.ssot.get_recent_tasks(limit=100))
+
+        # 전략 데이터
+        strategy_signals = [s for s in signals if s["kind"] == "weekly_strategy"]
+        strategy_summary = ""
+        if strategy_signals:
+            try:
+                strat = json.loads(strategy_signals[-1].get("data", "{}"))
+                biggest_win = strat.get("retrospective", {}).get("biggest_win", "N/A")
+                priorities = strat.get("next_week_priorities", [])
+                if priorities:
+                    p1 = priorities[0].get("goal", "N/A")
+                    strategy_summary = f"\n주간 하이라이트: {biggest_win}\n다음 주 1순위: {p1}"
+            except:
+                pass
+
+        report = f"""REZE 주간 리포트 ({week_start} ~ {today.strftime('%Y-%m-%d')})
+
+요약
+  블로그 발행: {blog_published}개
+  발견/기회: {discoveries}건
+  자동 수리: {auto_fixes}회
+  태스크 완료: {tasks_completed}건
+{strategy_summary}
+
+보스님, 이번 주도 열심히 일했습니다! 🫡
+"""
+
+        # Discord 전송
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                config.DISCORD_WEBHOOK_DAILY,
+                json={"content": report[:2000]}
+            )
+
+        state.ssot.save_signal("weekly_report", json.dumps({
+            "week_start": week_start,
+            "blog_published": blog_published,
+            "discoveries": discoveries
+        }))
+
+        logger.info("Weekly report sent")
+
+    except Exception as e:
+        logger.error(f"Weekly report failed: {e}")
+
+
+async def security_scan_job():
+    """매주 토요일 03:00: 보안 스캔."""
+    logger.info("Running security scan")
+
+    try:
+        findings = []
+
+        # 1. npm audit (workspace 내 프로젝트들)
+        workspace = Path.home() / "reze-agent" / "workspace"
+        for project in workspace.iterdir():
+            package_json = project / "package.json"
+            if package_json.exists():
+                try:
+                    result = subprocess.run(
+                        ["npm", "audit", "--json"],
+                        cwd=str(project),
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if result.returncode != 0:
+                        try:
+                            audit = json.loads(result.stdout)
+                            vulns = audit.get("metadata", {}).get("vulnerabilities", {})
+                            critical = vulns.get("critical", 0) + vulns.get("high", 0)
+                            if critical > 0:
+                                findings.append({
+                                    "type": "npm_vulnerability",
+                                    "project": project.name,
+                                    "critical_high": critical
+                                })
+                        except:
+                            pass
+                except Exception:
+                    pass
+
+        # 2. pip check (Python deps)
+        try:
+            result = subprocess.run(
+                ["pip", "check"],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                findings.append({
+                    "type": "pip_conflict",
+                    "detail": result.stdout[:200]
+                })
+        except Exception:
+            pass
+
+        # 3. 민감 파일 체크
+        sensitive_patterns = [".env", "credentials", "secret", "private_key"]
+        for pattern in sensitive_patterns:
+            try:
+                result = subprocess.run(
+                    ["find", str(Path.home() / "reze-agent"), "-name", f"*{pattern}*", "-type", "f"],
+                    capture_output=True, text=True, timeout=30
+                )
+                files = [f for f in result.stdout.strip().split("\n") if f and not "node_modules" in f]
+                for f in files:
+                    # .env는 정상, 하지만 .env.backup 같은건 위험
+                    if f.endswith(".env"):
+                        continue
+                    findings.append({
+                        "type": "sensitive_file",
+                        "path": f
+                    })
+            except Exception:
+                pass
+
+        # 4. 결과 처리
+        if findings:
+            # 발견 저장
+            for f in findings:
+                if f["type"] == "npm_vulnerability" and f.get("critical_high", 0) >= 5:
+                    await process_discovery(
+                        "security_vulnerability",
+                        "security_scan",
+                        {"summary": f"npm 취약점: {f['project']} ({f['critical_high']}개)", **f}
+                    )
+
+            state.ssot.save_signal("security_scan", json.dumps({
+                "findings": len(findings),
+                "details": findings[:10]
+            }))
+
+            # Alert for critical
+            critical_count = sum(1 for f in findings if f["type"] == "npm_vulnerability" and f.get("critical_high", 0) >= 5)
+            if critical_count > 0 and state.alert_manager:
+                await state.alert_manager.send(
+                    "warning", "security_scan",
+                    f"보안 스캔: {critical_count}개 프로젝트에서 심각한 취약점 발견"
+                )
+        else:
+            state.ssot.save_signal("security_scan", json.dumps({"findings": 0, "status": "clean"}))
+
+        logger.info(f"Security scan complete: {len(findings)} findings")
+
+    except Exception as e:
+        logger.error(f"Security scan failed: {e}")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
@@ -582,6 +1077,26 @@ async def lifespan(app: FastAPI):
     state.scheduler.add_job(
         daily_report_job, "cron", hour=21, minute=0, id="daily_report_discord"
     )
+
+    # Phase 2: Research & Strategy Jobs
+    state.scheduler.add_job(
+        trend_scan_job, "cron", hour=8, minute=0, id="trend_scan"
+    )  # 매일 08:00
+    state.scheduler.add_job(
+        competitor_check_job, "cron", day_of_week="mon", hour=9, minute=0, id="competitor_check"
+    )  # 월요일 09:00
+    state.scheduler.add_job(
+        keyword_scan_job, "cron", day_of_week="wed", hour=9, minute=0, id="keyword_scan"
+    )  # 수요일 09:00
+    state.scheduler.add_job(
+        strategic_thinking_job, "cron", day_of_week="sun", hour=20, minute=0, id="strategic_thinking"
+    )  # 일요일 20:00
+    state.scheduler.add_job(
+        weekly_report_job, "cron", day_of_week="sun", hour=21, minute=0, id="weekly_report"
+    )  # 일요일 21:00
+    state.scheduler.add_job(
+        security_scan_job, "cron", day_of_week="sat", hour=3, minute=0, id="security_scan"
+    )  # 토요일 03:00
 
     state.scheduler.start()
 
