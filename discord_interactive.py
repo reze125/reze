@@ -104,33 +104,51 @@ async def status():
     from pathlib import Path
     from ssot import SSOT
 
-    ssot = SSOT()
-    db = ssot._get_db()
+    try:
+        ssot = SSOT()
+        db = ssot._get_db()
 
-    skills_count = len(list(Path.home().joinpath("reze-agent/skills").iterdir()))
+        # Skills count (with error handling)
+        skills_path = Path.home().joinpath("reze-agent/skills")
+        skills_count = len(list(skills_path.iterdir())) if skills_path.exists() else 0
 
-    discoveries_today = db.execute(
-        "SELECT COUNT(*) FROM discoveries WHERE created_at > datetime('now', '-1 day')"
-    ).fetchone()[0]
+        # discoveries_today (handle missing table)
+        try:
+            discoveries_today = db.execute(
+                "SELECT COUNT(*) FROM discoveries WHERE created_at > datetime('now', '-1 day')"
+            ).fetchone()[0]
+        except:
+            discoveries_today = 0
 
-    evolutions_today = db.execute(
-        "SELECT COUNT(*) FROM evolutions WHERE created_at > datetime('now', '-1 day')"
-    ).fetchone()[0]
+        # evolutions_today (handle missing table)
+        try:
+            evolutions_today = db.execute(
+                "SELECT COUNT(*) FROM evolutions WHERE created_at > datetime('now', '-1 day')"
+            ).fetchone()[0]
+        except:
+            evolutions_today = 0
 
-    lessons_today = db.execute(
-        "SELECT COUNT(*) FROM signals WHERE kind='lesson_learned' AND created_at > datetime('now', '-1 day')"
-    ).fetchone()[0]
+        # lessons_today - fix kind from 'lesson_learned' to 'task_lesson'
+        try:
+            lessons_today = db.execute(
+                "SELECT COUNT(*) FROM signals WHERE kind='task_lesson' AND created_at > datetime('now', '-1 day')"
+            ).fetchone()[0]
+        except:
+            lessons_today = 0
 
-    ssot.close()
+        ssot.close()
 
-    return {
-        "skills": skills_count,
-        "discoveries_today": discoveries_today,
-        "evolutions_today": evolutions_today,
-        "lessons_today": lessons_today,
-        "pending_approvals": len([a for a in pending_approvals if a["status"] == "pending"]),
-        "version": "3.3-p4",
-    }
+        return {
+            "skills": skills_count,
+            "discoveries_today": discoveries_today,
+            "evolutions_today": evolutions_today,
+            "lessons_today": lessons_today,
+            "pending_approvals": len([a for a in pending_approvals if a["status"] == "pending"]),
+            "version": "4.0-ultimate",
+        }
+    except Exception as e:
+        logger.error(f"/boss/status error: {e}")
+        return {"error": str(e), "version": "4.0-ultimate"}
 
 
 @router.get("/history")

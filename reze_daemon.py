@@ -1806,13 +1806,16 @@ async def _discord_notify_fn(message: str):
 
 
 async def _tavily_search_fn(query: str) -> list:
-    """Tavily 검색 헬퍼."""
+    """Tavily 검색 헬퍼 - tools._exec_web_search() 재사용."""
     try:
-        import os
-        from tavily import TavilyClient
-        client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", ""))
-        result = client.search(query, max_results=5)
-        return result.get("results", [])
+        if state.tools:
+            result = await state.tools._exec_web_search(query)
+            if result.startswith("ERROR"):
+                logger.warning(f"Tavily search error: {result}")
+                return []
+            # 결과를 리스트 형태로 변환
+            return [{"content": result}]
+        return []
     except Exception as e:
         logger.warning(f"Tavily search failed: {e}")
         return []

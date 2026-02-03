@@ -964,7 +964,20 @@ JSON 응답: {{"score": 숫자, "feedback": "구체적 개선 방향"}}"""
 JSON: {{"lesson": "...", "improvement": "...", "pattern": "..."}}"""
 
             reflection = await self.router.call("reflection", [{"role": "user", "content": reflection_prompt}])
-            parsed = json.loads(reflection.text)
+
+            # 빈 응답 체크
+            if not reflection or not reflection.text or not reflection.text.strip():
+                logger.warning("Reflection returned empty response")
+                return
+
+            # JSON 파싱 (```json 블록 처리)
+            text = reflection.text.strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+
+            parsed = json.loads(text)
 
             # signals 테이블에 교훈 저장
             self.ssot.add_signal(

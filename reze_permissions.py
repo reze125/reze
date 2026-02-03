@@ -71,7 +71,11 @@ class PermissionSystem:
                 return PermissionTier.AUTO_APPROVE
 
         # Step 4: source 기반 판단
-        if source in ("api", "schedule"):
+        TRUSTED_SOURCES = (
+            "api", "schedule", "judgment", "autonomous_loop",
+            "self_healing", "agent_supervisor"
+        )
+        if source in TRUSTED_SOURCES:
             return PermissionTier.STANDARD
         return PermissionTier.CRITICAL
 
