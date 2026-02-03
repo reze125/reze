@@ -507,6 +507,52 @@ class SSOT:
             completed_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_ab_tests_status ON ab_tests(status);
+
+        -- v5.0 SOVEREIGN Phase 2: Discovery Engine + Universal Planner
+
+        CREATE TABLE IF NOT EXISTS managed_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT DEFAULT 'unknown',
+            description TEXT,
+            tech_stack TEXT DEFAULT '[]',
+            port INTEGER,
+            health_check TEXT,
+            restart_command TEXT,
+            project_path TEXT,
+            dependencies TEXT DEFAULT '[]',
+            status TEXT DEFAULT 'active',
+            risk_level TEXT DEFAULT 'low',
+            market_analysis TEXT,
+            discovered_at TEXT DEFAULT (datetime('now')),
+            last_checked TEXT,
+            last_analysis TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tool_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT,
+            tool TEXT NOT NULL,
+            input_summary TEXT,
+            output_summary TEXT,
+            success INTEGER,
+            duration_ms INTEGER,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_log_task ON tool_log(task_id);
+
+        CREATE TABLE IF NOT EXISTS execution_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            total_steps INTEGER,
+            completed_steps INTEGER DEFAULT 0,
+            replans INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'created',
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_execution_plans_status ON execution_plans(status);
         """)
         self.conn.commit()
 
@@ -1495,6 +1541,111 @@ class SSOT:
             WHERE task_type=? AND action=? AND status='done'
         """, [target_type, action]).fetchone()
         return row[0] if row else 0
+
+    # ========== v5.0 SOVEREIGN Phase 2 헬퍼 메서드 ==========
+
+    # === managed_services 메서드 ===
+
+    def register_managed_service(self, data: dict):
+        """서비스 upsert (managed_services 테이블)."""
+        import json as _json
+        self.conn.execute("""
+            INSERT INTO managed_services (name, category, description, tech_stack, port,
+                health_check, restart_command, project_path, dependencies, risk_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                category=excluded.category, description=excluded.description,
+                tech_stack=excluded.tech_stack, port=excluded.port,
+                health_check=excluded.health_check, restart_command=excluded.restart_command,
+                project_path=excluded.project_path, dependencies=excluded.dependencies,
+                risk_level=excluded.risk_level, last_checked=datetime('now')
+        """, (data.get("name"), data.get("category", "unknown"),
+              data.get("description", ""),
+              _json.dumps(data.get("tech_stack", [])) if isinstance(data.get("tech_stack"), list) else data.get("tech_stack", "[]"),
+              data.get("port"),
+              data.get("health_check", ""), data.get("restart_command", ""),
+              data.get("project_path", ""),
+              _json.dumps(data.get("dependencies", [])) if isinstance(data.get("dependencies"), list) else data.get("dependencies", "[]"),
+              data.get("risk_level", "low")))
+        self.conn.commit()
+
+    def get_all_services(self) -> list:
+        """모든 managed_services 조회."""
+        rows = self.conn.execute(
+            "SELECT * FROM managed_services WHERE status != 'deleted' ORDER BY name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_service(self, name: str):
+        """특정 managed_service 조회."""
+        row = self.conn.execute(
+            "SELECT * FROM managed_services WHERE name = ?", (name,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_service_status(self, name: str, status: str):
+        """managed_service 상태 업데이트."""
+        self.conn.execute(
+            "UPDATE managed_services SET status=?, last_checked=datetime('now') WHERE name=?",
+            (status, name))
+        self.conn.commit()
+
+    # === tool_log 메서드 ===
+
+    def log_tool_execution(self, task_id, tool, input_data, output, success, duration_ms):
+        """도구 실행 로그 저장."""
+        self.conn.execute(
+            "INSERT INTO tool_log (task_id, tool, input_summary, output_summary, success, duration_ms) VALUES (?,?,?,?,?,?)",
+            (task_id, tool, str(input_data)[:500], str(output)[:500], int(success), duration_ms))
+        self.conn.commit()
+
+    # === execution_plans 메서드 ===
+
+    def save_execution_plan(self, task_id, plan_json, total_steps):
+        """실행 계획 저장."""
+        cur = self.conn.execute(
+            "INSERT INTO execution_plans (task_id, plan_json, total_steps) VALUES (?,?,?)",
+            (task_id, plan_json, total_steps))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_plan_progress(self, plan_id, completed_steps, status):
+        """계획 진행 상태 업데이트."""
+        self.conn.execute("""
+            UPDATE execution_plans SET completed_steps=?, status=?,
+            completed_at=CASE WHEN ?='completed' THEN datetime('now') ELSE completed_at END
+            WHERE id=?""",
+            (completed_steps, status, status, plan_id))
+        self.conn.commit()
+
+    # === find_similar_plans (plan_cache_v4 활용) ===
+
+    def find_similar_plans(self, task: str, top_k: int = 3) -> list:
+        """plan_cache_v4에서 유사 계획 검색 (키워드)."""
+        words = task.lower().split()[:5]
+        results = []
+        seen = set()
+        for word in words:
+            if len(word) < 3:
+                continue
+            rows = self.conn.execute(
+                "SELECT * FROM plan_cache_v4 WHERE task_pattern LIKE ? AND score > 0.5 ORDER BY score DESC LIMIT ?",
+                (f"%{word}%", top_k)).fetchall()
+            for r in rows:
+                d = dict(r)
+                if d["task_pattern"] not in seen:
+                    seen.add(d["task_pattern"])
+                    results.append(d)
+        return results[:top_k]
+
+    # === enqueue_simple_task 헬퍼 ===
+
+    def enqueue_simple_task(self, title: str, source: str = "system", priority: int = 5):
+        """daemon_tasks에 간단한 태스크 추가."""
+        self.conn.execute(
+            "INSERT INTO daemon_tasks (id, task_spec, source, priority, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+            (self._new_id("dtask"), title, source, priority, self._kst_now()))
+        self.conn.commit()
 
     # === 리소스 관리 ===
     def close(self) -> None:

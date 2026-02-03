@@ -46,6 +46,8 @@ from launch_sequence import LaunchSequence
 
 # v4.0 ULTIMATE imports
 from capability_engine import CapabilityEngine
+from discovery_engine import DiscoveryEngine
+from universal_planner import UniversalPlanner, TaskExecutor as PlanExecutor
 from autonomous_ops import AutonomousLoop
 from goal_execution_bridge import GoalExecutionBridge
 from agent_supervisor import AgentSupervisor
@@ -98,6 +100,10 @@ class AppState:
     growth_engine: CrossPortfolioGrowth = None
     meta_cognition: MetaCognitionReview = None
     prompt_evolver: PromptEvolver = None
+    # v5.0 SOVEREIGN
+    discovery: DiscoveryEngine = None
+    planner: UniversalPlanner = None
+    plan_executor: PlanExecutor = None
 
 state = AppState()
 
@@ -875,6 +881,20 @@ async def competitor_check_job():
 
     except Exception as e:
         logger.error(f"Competitor check failed: {e}")
+
+
+async def discovery_scan_job():
+    """30분마다: 서버 변화 감지 (v5.0 SOVEREIGN)."""
+    try:
+        if not state.discovery:
+            return
+        discoveries = await state.discovery.full_scan()
+        if discoveries:
+            logger.info(f"Discovery: {len(discoveries)} changes")
+            state.ssot.save_signal("discovery",
+                json.dumps([d.get("name", "?") for d in discoveries]))
+    except Exception as e:
+        logger.error(f"Discovery scan error: {e}")
 
 
 async def keyword_scan_job():
@@ -2213,10 +2233,31 @@ async def lifespan(app: FastAPI):
         discord_notify=_discord_notify_fn,
     )
 
+    # v5.0 SOVEREIGN Phase 2
+    state.discovery = DiscoveryEngine(
+        ssot=state.ssot,
+        tools=state.tools,
+        call_llm_fn=_call_llm_for_learning,
+        discord_notify=_discord_notify_fn,
+    )
+    state.planner = UniversalPlanner(
+        ssot=state.ssot,
+        tools=state.tools,
+        call_llm_fn=_call_llm_for_learning,
+    )
+    state.plan_executor = PlanExecutor(
+        ssot=state.ssot,
+        tools=state.tools,
+        planner=state.planner,
+        call_llm_fn=_call_llm_for_learning,
+    )
+    logger.info("v5.0 SOVEREIGN: Discovery + Planner initialized")
+
     # 스케줄러
     state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
     state.scheduler.add_job(health_check_job, "interval", hours=1, id="health_check")
     state.scheduler.add_job(judgment_job, "interval", hours=6, id="judgment")
+    state.scheduler.add_job(discovery_scan_job, "interval", minutes=30, id="discovery_scan")  # v5.0
     state.scheduler.add_job(self_review_job, "cron", day_of_week="mon", hour=9, id="self_review")
 
     # v3.3 신규 스케줄
@@ -2480,6 +2521,25 @@ async def run_task(req: RunRequest, _=Depends(verify_token)):
             status="queued",
             message=f"Task queued with priority {req.priority}",
         )
+
+
+@app.post("/plan")
+async def plan_endpoint(req: RunRequest, _=Depends(verify_token)):
+    """v5.0: 복잡한 태스크를 계획→실행."""
+    task = req.task
+    if not task.strip():
+        raise HTTPException(status_code=400, detail="Task cannot be empty")
+
+    if not state.planner or not state.plan_executor:
+        raise HTTPException(status_code=503, detail="Planner not initialized")
+
+    try:
+        plan = await state.planner.plan(task)
+        result = await state.plan_executor.execute(plan, source="api")
+        return result
+    except Exception as e:
+        logger.error(f"/plan error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/tasks")

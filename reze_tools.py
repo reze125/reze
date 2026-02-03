@@ -71,8 +71,8 @@ class ToolExecutor:
             return f"BLOCKED: '{tool}' 명령이 CRITICAL 등급입니다. 수동 승인이 필요합니다."
 
         if tier == PermissionTier.DANGEROUS:
-            # DANGEROUS는 api/schedule 소스에서는 STANDARD로 취급 (v3.3 설계)
-            if source not in ("api", "schedule"):
+            # DANGEROUS는 TRUSTED_SOURCES에서는 허용 (v5.0: discovery, capability 등 포함)
+            if source not in PermissionSystem.TRUSTED_SOURCES:
                 return f"BLOCKED: '{tool}' 명령이 DANGEROUS 등급입니다. source={source}에서 자동 실행 불가."
             logger.warning(f"DANGEROUS but allowed (source={source}): {tool} {str(tool_input)[:80]}")
 
