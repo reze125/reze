@@ -173,6 +173,107 @@ class SSOT:
             created_at TEXT DEFAULT (datetime('now')),
             completed_at TEXT
         );
+
+        -- v3.3 Phase 4 Part D: SaaS 성장 자동화
+        CREATE TABLE IF NOT EXISTS saas_health (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            active_subs INTEGER DEFAULT 0,
+            past_due_subs INTEGER DEFAULT 0,
+            cancelled_subs INTEGER DEFAULT 0,
+            paused_subs INTEGER DEFAULT 0,
+            mrr_cents INTEGER DEFAULT 0,
+            arr_cents INTEGER DEFAULT 0,
+            total_revenue_cents INTEGER DEFAULT 0,
+            total_orders INTEGER DEFAULT 0,
+            total_customers INTEGER DEFAULT 0,
+            metadata TEXT,
+            measured_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_saas_health_product ON saas_health(product_name, measured_at);
+
+        CREATE TABLE IF NOT EXISTS landing_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            page_url TEXT,
+            visitors INTEGER DEFAULT 0,
+            signups INTEGER DEFAULT 0,
+            conversion_rate REAL DEFAULT 0.0,
+            bounce_rate REAL DEFAULT 0.0,
+            avg_time_on_page REAL DEFAULT 0.0,
+            headline_variant TEXT,
+            cta_variant TEXT,
+            notes TEXT,
+            measured_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_landing_metrics_product ON landing_metrics(product_name, measured_at);
+
+        CREATE TABLE IF NOT EXISTS feature_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            source TEXT DEFAULT 'manual',
+            category TEXT DEFAULT 'feature_request',
+            title TEXT NOT NULL,
+            description TEXT,
+            user_email TEXT,
+            impact_score INTEGER DEFAULT 0,
+            effort_score INTEGER DEFAULT 0,
+            priority_score REAL DEFAULT 0.0,
+            status TEXT DEFAULT 'new',
+            llm_analysis TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_feature_requests_product ON feature_requests(product_name, status);
+
+        CREATE TABLE IF NOT EXISTS email_campaigns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_type TEXT NOT NULL,
+            product_name TEXT,
+            recipient_email TEXT,
+            subject TEXT,
+            status TEXT DEFAULT 'pending',
+            trigger_event TEXT,
+            sent_at TEXT,
+            opened_at TEXT,
+            clicked_at TEXT,
+            metadata TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_email_campaigns_type ON email_campaigns(campaign_type, status);
+
+        -- v3.3 Phase 4 Part E: Gumroad 자동화
+        CREATE TABLE IF NOT EXISTS gumroad_sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id TEXT UNIQUE,
+            product_id TEXT NOT NULL,
+            product_name TEXT,
+            email TEXT,
+            price_cents INTEGER DEFAULT 0,
+            currency TEXT DEFAULT 'usd',
+            refunded INTEGER DEFAULT 0,
+            sale_timestamp TEXT,
+            metadata TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_gumroad_sales_product ON gumroad_sales(product_id, sale_timestamp);
+
+        CREATE TABLE IF NOT EXISTS launches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            launch_type TEXT DEFAULT 'new_product',
+            target_date TEXT NOT NULL,
+            status TEXT DEFAULT 'planning',
+            channels TEXT,
+            pre_launch_done TEXT,
+            launch_day_done TEXT,
+            post_launch_done TEXT,
+            results TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_launches_status ON launches(status, target_date);
         """)
         self.conn.commit()
 
@@ -185,6 +286,10 @@ class SSOT:
 
     def _kst_date(self) -> str:
         return datetime.now(config.KST).strftime("%Y-%m-%d")
+
+    def _get_db(self):
+        """SQLite connection 반환. 외부 모듈이 직접 쿼리할 때 사용."""
+        return self.conn
 
     # === 태스크 (기존 APEX 호환) ===
     def create_task(self, title: str) -> str:
@@ -513,6 +618,142 @@ class SSOT:
             (f"{today}%",)
         ).fetchone()
         return row[0] if row else 0
+
+    # === v3.3 Phase 4 Part D+E: SaaS & Gumroad 헬퍼 ===
+
+    def save_saas_health(self, product_name: str, active: int = 0, past_due: int = 0,
+                         cancelled: int = 0, paused: int = 0, mrr_cents: int = 0,
+                         total_revenue_cents: int = 0, total_orders: int = 0,
+                         total_customers: int = 0, metadata: str = None) -> int:
+        """SaaS 헬스 스냅샷 저장."""
+        cur = self.conn.execute(
+            """INSERT INTO saas_health(product_name, active_subs, past_due_subs,
+               cancelled_subs, paused_subs, mrr_cents, arr_cents,
+               total_revenue_cents, total_orders, total_customers, metadata, measured_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (product_name, active, past_due, cancelled, paused,
+             mrr_cents, mrr_cents * 12, total_revenue_cents, total_orders,
+             total_customers, metadata, self._kst_now())
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_latest_saas_health(self, product_name: str = None) -> list[dict]:
+        """최신 SaaS 헬스 데이터. product_name=None이면 전체."""
+        if product_name:
+            rows = self.conn.execute(
+                """SELECT * FROM saas_health WHERE product_name=?
+                   ORDER BY measured_at DESC LIMIT 1""",
+                (product_name,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT sh.* FROM saas_health sh
+                   INNER JOIN (
+                       SELECT product_name, MAX(measured_at) as max_at
+                       FROM saas_health GROUP BY product_name
+                   ) latest ON sh.product_name = latest.product_name
+                   AND sh.measured_at = latest.max_at"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_gumroad_sale(self, sale_id: str, product_id: str, product_name: str,
+                          email: str, price_cents: int, currency: str = "usd",
+                          sale_timestamp: str = None, metadata: str = None) -> int:
+        """Gumroad 판매 기록."""
+        cur = self.conn.execute(
+            """INSERT OR IGNORE INTO gumroad_sales(sale_id, product_id, product_name,
+               email, price_cents, currency, sale_timestamp, metadata)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (sale_id, product_id, product_name, email, price_cents,
+             currency, sale_timestamp or self._kst_now(), metadata)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_gumroad_revenue(self, days: int = 30) -> dict:
+        """최근 N일 Gumroad 수익 요약."""
+        row = self.conn.execute(
+            """SELECT COUNT(*) as sales, COALESCE(SUM(price_cents), 0) as total_cents
+               FROM gumroad_sales
+               WHERE refunded=0 AND created_at > datetime('now', ?)""",
+            (f"-{days} days",)
+        ).fetchone()
+        return {"sales": row[0], "total_cents": row[1], "total_usd": row[1] / 100.0}
+
+    def save_feature_request(self, product_name: str, title: str,
+                             description: str = "", source: str = "manual",
+                             category: str = "feature_request",
+                             user_email: str = "") -> int:
+        """피드백/기능요청 저장."""
+        cur = self.conn.execute(
+            """INSERT INTO feature_requests(product_name, source, category,
+               title, description, user_email) VALUES(?,?,?,?,?,?)""",
+            (product_name, source, category, title, description, user_email)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def save_email_campaign(self, campaign_type: str, product_name: str,
+                            recipient_email: str, subject: str,
+                            trigger_event: str = "") -> int:
+        """이메일 캠페인 기록."""
+        cur = self.conn.execute(
+            """INSERT INTO email_campaigns(campaign_type, product_name,
+               recipient_email, subject, trigger_event) VALUES(?,?,?,?,?)""",
+            (campaign_type, product_name, recipient_email, subject, trigger_event)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_email_status(self, campaign_id: int, status: str) -> None:
+        """이메일 상태 업데이트."""
+        col = "sent_at" if status == "sent" else ("opened_at" if status == "opened" else "clicked_at")
+        self.conn.execute(
+            f"UPDATE email_campaigns SET status=?, {col}=? WHERE id=?",
+            (status, self._kst_now(), campaign_id)
+        )
+        self.conn.commit()
+
+    def save_launch(self, product_name: str, target_date: str,
+                    launch_type: str = "new_product", channels: str = "") -> int:
+        """런치 계획 저장."""
+        cur = self.conn.execute(
+            """INSERT INTO launches(product_name, launch_type, target_date, channels)
+               VALUES(?,?,?,?)""",
+            (product_name, launch_type, target_date, channels)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def update_launch(self, launch_id: int, status: str = None,
+                      pre_launch_done: str = None, launch_day_done: str = None,
+                      post_launch_done: str = None, results: str = None) -> None:
+        """런치 상태 업데이트."""
+        updates = []
+        params = []
+        if status:
+            updates.append("status=?")
+            params.append(status)
+        if pre_launch_done:
+            updates.append("pre_launch_done=?")
+            params.append(pre_launch_done)
+        if launch_day_done:
+            updates.append("launch_day_done=?")
+            params.append(launch_day_done)
+        if post_launch_done:
+            updates.append("post_launch_done=?")
+            params.append(post_launch_done)
+        if results:
+            updates.append("results=?")
+            params.append(results)
+        if updates:
+            updates.append("updated_at=datetime('now')")
+            params.append(launch_id)
+            self.conn.execute(
+                f"UPDATE launches SET {', '.join(updates)} WHERE id=?", tuple(params)
+            )
+            self.conn.commit()
 
     # === 리소스 관리 ===
     def close(self) -> None:

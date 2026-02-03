@@ -27,6 +27,23 @@ from reze_self_healing import SelfHealing
 from reze_alert import AlertManager
 from reze_biz import BizTracker
 
+# Phase 4 Part D+E
+from saas_monitor import SaaSMonitor
+from saas_marketing import (
+    router as ls_webhook_router,
+    init_marketing,
+)
+from gumroad_manager import (
+    router as gr_webhook_router,
+    init_gumroad,
+)
+from feature_prioritizer import (
+    router as feedback_router,
+    init_prioritizer,
+)
+from landing_optimizer import LandingOptimizer
+from launch_sequence import LaunchSequence
+
 import logging
 
 # === 로깅 설정 ===
@@ -56,6 +73,10 @@ class AppState:
     self_healing: SelfHealing = None
     alert_manager: AlertManager = None
     biz_tracker: BizTracker = None
+    # Phase 4 Part D+E
+    saas_monitor: SaaSMonitor = None
+    landing_optimizer: LandingOptimizer = None
+    launch_sequence: LaunchSequence = None
 
 state = AppState()
 
@@ -509,6 +530,25 @@ async def daily_report_job():
                     pass
         else:
             report += "\n승인 대기 (LOCK): 없음\n"
+
+        # Phase 4 Part D+E: SaaS + Gumroad
+        saas_signals = [s for s in signals_today if s["kind"] == "saas_subscription_check"]
+        gumroad_signals = [s for s in signals_today if s["kind"] == "gumroad_sales_check"]
+
+        if saas_signals or gumroad_signals:
+            report += "\n수익\n"
+            for s in saas_signals:
+                try:
+                    p = json.loads(s.get("data", "{}"))
+                    report += f"  SaaS: {p.get('active', 0)} active, MRR ${p.get('mrr_usd', 0):.2f}\n"
+                except:
+                    pass
+            for s in gumroad_signals:
+                try:
+                    p = json.loads(s.get("data", "{}"))
+                    report += f"  Gumroad: {p.get('total_sales', 0)}건, ${p.get('total_usd', 0):.2f} (30d)\n"
+                except:
+                    pass
 
         # Discord 전송
         async with aiohttp.ClientSession() as session:
@@ -1389,6 +1429,89 @@ JSON만 반환.""",
 
 
 # ============================================================
+# Phase 4 Part D+E Jobs
+# ============================================================
+
+async def saas_daily_check_job():
+    """매일 07:30: LemonSqueezy SaaS 전체 체크."""
+    try:
+        if state.saas_monitor:
+            await state.saas_monitor.daily_check()
+    except Exception as e:
+        logger.error(f"SaaS daily check failed: {e}")
+
+
+async def gumroad_daily_check_job():
+    """매일 07:45: Gumroad 판매 체크."""
+    try:
+        from gumroad_manager import get_gumroad
+        gumroad = get_gumroad()
+        if gumroad:
+            await gumroad.daily_check()
+    except Exception as e:
+        logger.error(f"Gumroad daily check failed: {e}")
+
+
+async def landing_weekly_review_job():
+    """월요일 10:00: 랜딩페이지 전환율 주간 리뷰."""
+    try:
+        if state.landing_optimizer:
+            review = await state.landing_optimizer.weekly_review()
+
+            # 각 제품에 대해 변형 생성
+            for product_key in config.SAAS_PRODUCTS:
+                try:
+                    await state.landing_optimizer.generate_variants(product_key)
+                except Exception as e:
+                    logger.warning(f"Variant generation failed for {product_key}: {e}")
+    except Exception as e:
+        logger.error(f"Landing weekly review failed: {e}")
+
+
+async def launch_check_job():
+    """매일 08:30: 런치 일정 체크 → 알림."""
+    try:
+        if state.launch_sequence:
+            await state.launch_sequence.check_due_launches()
+    except Exception as e:
+        logger.error(f"Launch check failed: {e}")
+
+
+async def feature_monthly_report_job():
+    """매월 1일 10:00: 피드백 월간 리포트."""
+    try:
+        from feature_prioritizer import get_prioritizer
+        prioritizer = get_prioritizer()
+        if prioritizer:
+            await prioritizer.monthly_report()
+    except Exception as e:
+        logger.error(f"Feature monthly report failed: {e}")
+
+
+async def saas_monthly_report_job():
+    """매월 1일 10:30: SaaS 월간 리포트."""
+    try:
+        if state.saas_monitor:
+            report = await state.saas_monitor.monthly_report()
+
+            # Discord 월간 리포트
+            if state.alert_manager and report.get("strategy"):
+                strategy = report["strategy"]
+                msg = (
+                    f"📊 **SaaS 월간 리포트**\n"
+                    f"건강한 제품: {strategy.get('healthiest_product', 'N/A')}\n"
+                    f"위험 제품: {strategy.get('at_risk_product', 'N/A')}\n"
+                    f"전략: {', '.join(strategy.get('growth_strategies', [])[:3])}"
+                )
+                try:
+                    await state.alert_manager.send("info", "saas_monthly", msg[:1900])
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"SaaS monthly report failed: {e}")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
@@ -1415,6 +1538,30 @@ async def lifespan(app: FastAPI):
     )
     state.alert_manager = AlertManager(state.ssot)
     state.biz_tracker = BizTracker(state.ssot)  # LS API key는 추후 설정
+
+    # Phase 4 Part D+E 초기화
+    state.saas_monitor = SaaSMonitor(
+        state.ssot,
+        alert_fn=state.alert_manager.send if state.alert_manager else None,
+        call_llm_fn=_call_llm_for_learning,
+    )
+    init_marketing(state.ssot, alert_fn=state.alert_manager.send if state.alert_manager else None)
+    init_gumroad(
+        state.ssot,
+        alert_fn=state.alert_manager.send if state.alert_manager else None,
+        call_llm_fn=_call_llm_for_learning,
+    )
+    init_prioritizer(state.ssot, call_llm_fn=_call_llm_for_learning)
+    state.landing_optimizer = LandingOptimizer(
+        state.ssot,
+        call_llm_fn=_call_llm_for_learning,
+        alert_fn=state.alert_manager.send if state.alert_manager else None,
+    )
+    state.launch_sequence = LaunchSequence(
+        state.ssot,
+        alert_fn=state.alert_manager.send if state.alert_manager else None,
+        call_llm_fn=_call_llm_for_learning,
+    )
 
     # 스케줄러
     state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
@@ -1461,6 +1608,29 @@ async def lifespan(app: FastAPI):
         cost_review_job, "cron", day=1, hour=9, minute=0, id="cost_review"
     )  # 매월 1일 09:00
 
+    # Phase 4 Part D+E 스케줄러
+    state.scheduler.add_job(
+        saas_daily_check_job, "cron", hour=7, minute=30, id="saas_daily_check"
+    )  # 매일 07:30 KST
+    state.scheduler.add_job(
+        gumroad_daily_check_job, "cron", hour=7, minute=45, id="gumroad_daily_check"
+    )  # 매일 07:45 KST
+    state.scheduler.add_job(
+        landing_weekly_review_job, "cron", day_of_week="mon", hour=10, minute=0,
+        id="landing_weekly_review"
+    )  # 월요일 10:00 KST
+    state.scheduler.add_job(
+        launch_check_job, "cron", hour=8, minute=30, id="launch_check"
+    )  # 매일 08:30 KST
+    state.scheduler.add_job(
+        feature_monthly_report_job, "cron", day=1, hour=10, minute=0,
+        id="feature_monthly_report"
+    )  # 매월 1일 10:00 KST
+    state.scheduler.add_job(
+        saas_monthly_report_job, "cron", day=1, hour=10, minute=30,
+        id="saas_monthly_report"
+    )  # 매월 1일 10:30 KST
+
     state.scheduler.start()
 
     # 큐 워커
@@ -1502,6 +1672,11 @@ app = FastAPI(
 # Phase 4: Boss API 라우터 등록
 from discord_interactive import router as boss_router
 app.include_router(boss_router)
+
+# Phase 4 Part D+E 라우터
+app.include_router(ls_webhook_router)
+app.include_router(gr_webhook_router)
+app.include_router(feedback_router)
 
 
 # === 인증 ===

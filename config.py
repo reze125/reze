@@ -162,3 +162,32 @@ SHELL_READ_ONLY = [
 SHELL_AUTO_APPROVE = [
     str(SCRIPTS_DIR / "publish-blog.sh"),
 ]
+
+# === Phase 4 Part D+E: SaaS & Gumroad ===
+LEMONSQUEEZY_API_KEY: str = os.getenv("LEMONSQUEEZY_API_KEY", "")
+LEMONSQUEEZY_WEBHOOK_SECRET: str = os.getenv("LEMONSQUEEZY_WEBHOOK_SECRET", "")
+LEMONSQUEEZY_STORE_ID: str = os.getenv("LEMONSQUEEZY_STORE_ID", "")
+GUMROAD_ACCESS_TOKEN: str = os.getenv("GUMROAD_ACCESS_TOKEN", "")
+GUMROAD_PING_SECRET: str = os.getenv("GUMROAD_PING_SECRET", "")
+EMAIL_PROVIDER: str = os.getenv("EMAIL_PROVIDER", "brevo")
+BREVO_API_KEY: str = os.getenv("BREVO_API_KEY", "")
+
+# SaaS 제품 목록 (LemonSqueezy 연동용)
+SAAS_PRODUCTS = {
+    "postpilot": {"name": "PostPilot", "type": "subscription"},
+    "browserpilot": {"name": "BrowserPilot", "type": "subscription"},
+    "agenthub": {"name": "AgentHub", "type": "subscription"},
+    "rag-service": {"name": "RAG-as-a-Service", "type": "subscription"},
+    "quotepilot": {"name": "QuotePilot", "type": "subscription", "plans": [19, 49, 99]},
+}
+
+# Gumroad 제품 목록
+GUMROAD_PRODUCTS = {
+    "product_1": {"name": "TBD", "type": "digital"},
+    "product_2": {"name": "TBD", "type": "digital"},
+    "product_3": {"name": "TBD", "type": "digital"},
+    "product_4": {"name": "TBD", "type": "digital"},
+}
+
+# Discord 웹훅 (수익 알림용 — 기존 ALERT 채널 재사용)
+DISCORD_WEBHOOK_REVENUE = DISCORD_WEBHOOK_ALERT

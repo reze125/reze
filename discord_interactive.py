@@ -105,7 +105,7 @@ async def status():
     from ssot import SSOT
 
     ssot = SSOT()
-    db = ssot.conn
+    db = ssot._get_db()
 
     skills_count = len(list(Path.home().joinpath("reze-agent/skills").iterdir()))
 
