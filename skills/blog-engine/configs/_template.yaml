@@ -1,0 +1,40 @@
+# 새 블로그 추가 시 이 파일을 복사하고 값만 수정
+name: "Template Blog"
+domain: "example.com"
+db_name: "example_db"
+db_table: "articles"
+pm2_name: "example-blog"
+
+content:
+  niche: "your niche here"
+  target_audience: "your audience"
+  tone: "authoritative yet approachable"
+  article_types:
+    - "tool_review"
+    - "comparison"
+    - "roundup"
+    - "tutorial"
+  min_words: 1500
+  max_words: 3000
+  posting_schedule: "tue,fri"
+
+seo:
+  primary_keywords: ["keyword1", "keyword2"]
+  competitor_sites: ["competitor1.com", "competitor2.com"]
+  target_search_intent: "commercial investigation"
+
+affiliate:
+  programs: ["impact", "shareasale", "direct"]
+  link_density: 3
+
+quality:
+  min_score: 85
+  comparison_standard: "TechRadar"
+
+branding:
+  primary_color: "#4F46E5"
+  logo_path: "/assets/logo.png"
+
+monitoring:
+  analytics: "plausible"
+  health_check_url: "https://example.com/api/health"

@@ -1,0 +1,39 @@
+name: "AI Tools Lab"
+domain: "aitoolslab.com"
+db_name: "aitoolslab_db"
+db_table: "articles"
+pm2_name: "ai-tools-lab"
+
+content:
+  niche: "AI tools reviews and comparisons"
+  target_audience: "tech-savvy professionals"
+  tone: "authoritative yet approachable"
+  article_types:
+    - "tool_review"
+    - "comparison"
+    - "roundup"
+    - "tutorial"
+  min_words: 1500
+  max_words: 3000
+  posting_schedule: "tue,fri"
+
+seo:
+  primary_keywords: ["AI tools", "AI software", "best AI tools"]
+  competitor_sites: ["techradar.com/best/ai-tools", "zapier.com/blog"]
+  target_search_intent: "commercial investigation"
+
+affiliate:
+  programs: ["impact", "shareasale", "direct"]
+  link_density: 3
+
+quality:
+  min_score: 85
+  comparison_standard: "TechRadar"
+
+branding:
+  primary_color: "#4F46E5"
+  logo_path: "/assets/aitoolslab-logo.png"
+
+monitoring:
+  analytics: "plausible"
+  health_check_url: "https://aitoolslab.com/api/health"

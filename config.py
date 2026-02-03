@@ -191,3 +191,18 @@ GUMROAD_PRODUCTS = {
 
 # Discord 웹훅 (수익 알림용 — 기존 ALERT 채널 재사용)
 DISCORD_WEBHOOK_REVENUE = DISCORD_WEBHOOK_ALERT
+
+
+# === v4.0 Tavily API 키 로테이션 ===
+_tavily_key_index = 0
+
+
+def get_tavily_key() -> str:
+    """라운드 로빈으로 Tavily API 키 반환."""
+    global _tavily_key_index
+    keys = TAVILY_API_KEYS if TAVILY_API_KEYS else ([TAVILY_API_KEY] if TAVILY_API_KEY else [])
+    if not keys:
+        return ""
+    key = keys[_tavily_key_index % len(keys)]
+    _tavily_key_index += 1
+    return key

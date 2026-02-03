@@ -507,3 +507,97 @@ def get_verification_delay(discovery_type: str) -> dict:
 # 메타학습 상수
 META_LEARNING_THRESHOLD = 30    # 교훈 30개 쌓이면 패턴 추출
 MAX_DAILY_LESSONS = 20          # 하루 교훈 최대 20개
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# v4.0 Universal Quality Gates
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUALITY_GATES = {
+    "blog_article": {
+        "hard_checks": {
+            "min_words": 1200,
+            "max_words": 3500,
+            "has_h2": True,
+            "has_internal_link": True,
+            "has_cta": True,
+            "no_banned_phrases": True,
+        },
+        "cross_review": {
+            "writer": "gemini_pro",
+            "reviewer": "groq",
+            "min_score": 85,
+            "max_retries": 2,
+            "review_prompt": "TechRadar/Zapier 수준 비교 채점"
+        }
+    },
+    "saas_report": {
+        "hard_checks": {
+            "has_metrics": True,
+            "has_comparison": True,
+            "has_action_items": True,
+            "max_staleness_hours": 24
+        },
+        "cross_review": {
+            "writer": "gemini_pro",
+            "reviewer": "groq",
+            "min_score": 75,
+            "max_retries": 1
+        }
+    },
+    "email_outreach": {
+        "hard_checks": {
+            "max_words": 200,
+            "has_cta": True,
+            "has_unsubscribe": True,
+            "no_spam_words": True
+        },
+        "cross_review": {
+            "writer": "gemini_flash",
+            "reviewer": "groq",
+            "min_score": 80,
+            "max_retries": 1
+        }
+    },
+    "code_change": {
+        "hard_checks": {
+            "has_backup": True,
+            "has_health_check": True,
+            "has_rollback_plan": True,
+            "no_forbidden_files": True
+        },
+        "test_required": True,
+        "cross_review": None
+    },
+    "strategy_document": {
+        "hard_checks": {
+            "has_data_backing": True,
+            "has_risk_assessment": True,
+            "has_alternatives": True,
+            "has_timeline": True
+        },
+        "cross_review": {
+            "writer": "gemini_pro",
+            "reviewer": "gemini_flash",
+            "min_score": 80,
+            "max_retries": 2
+        }
+    },
+    "discord_report": {
+        "hard_checks": {
+            "max_words": 500,
+            "has_summary": True,
+            "has_numbers": True
+        },
+        "cross_review": None
+    }
+}
+
+# 월간 토큰 예산
+MONTHLY_TOKEN_BUDGET = {
+    "gemini_pro": 1_000_000,
+    "gemini_flash": 2_000_000,
+    "groq": 5_000_000,
+    "cerebras": 10_000_000,
+    "tavily": 800,
+}

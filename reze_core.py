@@ -327,20 +327,30 @@ class OpenRouterProvider:
 class ModelRouter:
     """역할 기반 LLM 라우팅 + 폴백 체인."""
 
-    # 역할 → provider 매핑
+    # 역할 → provider 매핑 (v4.0 최적화)
     ROLE_ASSIGNMENT = {
-        "tool_call": "cerebras",
-        "extraction": "cerebras",
-        "classification": "cerebras",
-        "reasoning": "groq",
-        "planning": "groq",
-        "reflection": "groq",
-        "critic": "groq",
-        "writing": "gemini_pro",
-        "analysis": "gemini_pro",
-        "creative": "gemini_pro",
-        "final_review": "gemini_flash",
-        "summarization": "gemini_flash",
+        # 콘텐츠 생성 = Gemini Pro (품질 최우선)
+        "writing": "gemini_pro",        # 블로그 글, 리포트, 이메일 본문
+        "analysis": "gemini_pro",       # 분석 리포트
+        "creative": "gemini_pro",       # 창의적 콘텐츠
+
+        # 판단/분류 = Groq (빠른 판단)
+        "reasoning": "groq",            # 논리적 추론
+        "classification": "groq",       # 분류, 태스크 라우팅
+        "evaluation": "groq",           # 품질 채점 (크로스 리뷰)
+        "planning": "groq",             # 계획 수립
+        "critic": "groq",               # 비평
+
+        # 도구 선택 = Cerebras (최고 속도)
+        "tool_call": "cerebras",        # 도구 선택/호출
+        "extraction": "cerebras",       # 정보 추출
+        "quick": "cerebras",            # 간단한 질의
+
+        # 셀프 리플렉션 = Gemini Flash (깊은 반성)
+        "reflection": "gemini_flash",   # 태스크 반성/교훈 추출
+        "research": "gemini_flash",     # 웹 리서치 정리
+        "final_review": "gemini_flash", # 최종 검토
+        "summarization": "gemini_flash", # 요약
     }
 
     # 폴백 순서
@@ -632,11 +642,25 @@ class REZECore:
         self.output_validator = OutputValidator()
 
     async def run(self, task: str, source: str = "api") -> dict:
-        """메인 ReAct 루프."""
+        """메인 ReAct 루프 (v4.0: 학습 루프 통합)."""
         logger.info(f"Task started: {task[:100]} (source={source})")
 
         # trace_id 생성
         trace_id = self.ssot._new_id("trace")
+
+        # ── v4.0: 과거 경험 조회 ──
+        cached = self.ssot.find_cached_plan_v4(task)
+        reflections = self.ssot.get_recent_reflections_v4(limit=3)
+
+        experience_context = ""
+        if cached:
+            experience_context += f"\n\n[이전 성공 절차 참고]\n{cached['procedure']}"
+            self.ssot.increment_plan_usage_v4(cached['task_pattern'])
+            logger.info(f"Found cached plan: score={cached['score']}")
+        if reflections:
+            experience_context += "\n\n[과거 교훈 — 이 실수를 반복하지 마시오]"
+            for r in reflections:
+                experience_context += f"\n- {r['lesson']}: {r.get('suggested_approach', '')}"
 
         # 1. 스킬 매칭
         relevant_skills = self.skills_manager.find_relevant(task)
@@ -648,8 +672,8 @@ class REZECore:
         if relevant_skills:
             logger.info(f"Skills matched: {relevant_skills}")
 
-        # 2. 시스템 프롬프트
-        system_prompt = self._build_system_prompt(skill_context)
+        # 2. 시스템 프롬프트 (v4.0: 경험 컨텍스트 포함)
+        system_prompt = self._build_system_prompt(skill_context + experience_context)
 
         # 3. SSOT 태스크 기록
         task_id = self.ssot.create_task(task)
@@ -702,7 +726,31 @@ class REZECore:
                 self.ssot.update_iteration(iter_id, "FINAL_ANSWER", True)
                 self.ssot.complete_task(task_id, "success", answer)
                 logger.info(f"Task completed: {task_id} in {step + 1} steps, {total_tokens_used} tokens")
-                return self._result(True, answer, task_id, step + 1, total_tokens_used)
+
+                # ── v4.0: 성공 시 plan_cache 저장 ──
+                if step >= 1:  # 최소 2스텝 이상 걸린 태스크만
+                    try:
+                        procedure = self._extract_procedure(messages)
+                        self.ssot.cache_plan_v4(
+                            task_pattern=self._abstract_task(task),
+                            skills_used=relevant_skills,
+                            procedure=procedure,
+                            steps=step + 1,
+                            tokens=total_tokens_used,
+                            score=0.8
+                        )
+                    except Exception as e:
+                        logger.warning(f"Plan cache save failed: {e}")
+
+                # ── v4.0: 반성 + 교훈 추출 ──
+                result = self._result(True, answer, task_id, step + 1, total_tokens_used,
+                                      skills_used=relevant_skills, quality_score=0.8)
+                try:
+                    await self._reflect_and_learn(task, result)
+                except Exception as e:
+                    logger.warning(f"Reflect and learn failed: {e}")
+
+                return result
 
             # --- 루프 감지 ---
             current_action = f"{parsed['tool']}:{str(parsed.get('input', ''))[:100]}"
@@ -813,7 +861,8 @@ class REZECore:
 {skill_context}"""
 
     def _result(self, success: bool, answer: str, task_id: str,
-                steps: int, tokens: int) -> dict:
+                steps: int, tokens: int, skills_used: list = None,
+                quality_score: float = 0.0) -> dict:
         """결과 딕셔너리."""
         return {
             "success": success,
@@ -821,4 +870,151 @@ class REZECore:
             "task_id": task_id,
             "steps": steps,
             "total_tokens": tokens,
+            "skills_used": skills_used or [],
+            "quality_score": quality_score,
         }
+
+    # ============================================================
+    # v4.0 Learning Loop + Quality Gate
+    # ============================================================
+
+    async def _classify_output(self, task: str, output: str) -> str:
+        """산출물 유형 분류 (Cerebras — 빠른 분류)"""
+        prompt = f"""태스크: {task}
+산출물 첫 200자: {output[:200]}
+
+이 산출물의 유형을 다음 중 하나로 분류:
+blog_article, saas_report, email_outreach, code_change, strategy_document, discord_report, unknown
+
+유형만 영문으로 답하시오."""
+
+        try:
+            result = await self.router.call("classification", [{"role": "user", "content": prompt}])
+            type_str = result.text.strip().lower()
+            from reze_permissions import QUALITY_GATES
+            if type_str in QUALITY_GATES:
+                return type_str
+        except Exception as e:
+            logger.warning(f"Output classification failed: {e}")
+        return "unknown"
+
+    def _run_hard_checks(self, output: str, checks: dict) -> dict:
+        """규칙 기반 검증 (LLM 불필요)"""
+        failures = []
+        word_count = len(output.split())
+
+        if checks.get("min_words") and word_count < checks["min_words"]:
+            failures.append(f"단어 수 부족: {word_count} < {checks['min_words']}")
+        if checks.get("max_words") and word_count > checks["max_words"]:
+            failures.append(f"단어 수 초과: {word_count} > {checks['max_words']}")
+        if checks.get("has_h2") and output.count("## ") < 3 and output.count("<h2") < 3:
+            failures.append("H2 소제목 3개 미만")
+        if checks.get("has_cta") and not any(kw in output.lower() for kw in ["try", "get started", "sign up", "check out", "learn more"]):
+            failures.append("CTA(Call to Action) 없음")
+        if checks.get("has_summary") and "요약" not in output and "summary" not in output.lower():
+            failures.append("요약 섹션 없음")
+        if checks.get("has_numbers") and not re.search(r'\d+', output):
+            failures.append("수치 데이터 없음")
+
+        return {'passed': len(failures) == 0, 'failures': failures}
+
+    async def _cross_review(self, output: str, config: dict) -> dict:
+        """크로스 리뷰: 다른 LLM이 채점"""
+        prompt = f"""다음 콘텐츠를 100점 만점으로 채점하시오.
+
+채점 기준:
+1. 정보의 정확성과 깊이 (25점)
+2. 구조와 가독성 (25점)
+3. 실용성과 행동 가능성 (25점)
+4. 전문성과 신뢰도 (25점)
+
+콘텐츠:
+{output[:3000]}
+
+JSON 응답: {{"score": 숫자, "feedback": "구체적 개선 방향"}}"""
+
+        try:
+            result = await self.router.call("evaluation", [{"role": "user", "content": prompt}])
+            parsed = json.loads(result.text)
+            return {'score': parsed.get('score', 0), 'feedback': parsed.get('feedback', '')}
+        except Exception as e:
+            logger.warning(f"Cross review failed: {e}")
+            return {'score': 70, 'feedback': 'Review parsing failed'}
+
+    async def _reflect_and_learn(self, task: str, result: dict):
+        """모든 태스크 완료 후 반성 + 교훈 추출"""
+        try:
+            reflection_prompt = f"""태스크: {task}
+결과: {"성공" if result.get('success') else "실패"}
+소요 스텝: {result.get('steps', 0)}
+소요 토큰: {result.get('total_tokens', 0)}
+품질 점수: {result.get('quality_score', 'N/A')}
+사용 스킬: {result.get('skills_used', [])}
+
+다음을 추출하시오:
+1. 핵심 교훈 (1문장): 이 경험에서 배운 가장 중요한 것
+2. 개선점: 다음에 같은 종류의 태스크를 할 때 뭘 바꿔야 하는가
+3. 패턴: 비슷한 다른 태스크에도 적용할 수 있는 일반 원칙
+
+JSON: {{"lesson": "...", "improvement": "...", "pattern": "..."}}"""
+
+            reflection = await self.router.call("reflection", [{"role": "user", "content": reflection_prompt}])
+            parsed = json.loads(reflection.text)
+
+            # signals 테이블에 교훈 저장
+            self.ssot.add_signal(
+                type_="task_lesson",
+                data={
+                    "task": task[:200],
+                    "success": result.get('success', False),
+                    "lesson": parsed.get('lesson', ''),
+                    "improvement": parsed.get('improvement', ''),
+                    "pattern": parsed.get('pattern', ''),
+                    "steps": result.get('steps', 0),
+                    "tokens": result.get('total_tokens', 0),
+                    "score": result.get('quality_score', 0)
+                }
+            )
+
+            # 실패인 경우 reflections_v4 테이블에도 저장
+            if not result.get('success'):
+                self.ssot.save_reflection_v4(
+                    task_pattern=self._abstract_task(task),
+                    failure_reason=str(result.get('errors', 'unknown')),
+                    lesson=parsed.get('lesson', ''),
+                    suggested_approach=parsed.get('improvement', '')
+                )
+
+            logger.info(f"Reflection saved: {parsed.get('lesson', '')[:50]}")
+
+        except Exception as e:
+            logger.warning(f"Reflection failed: {e}")
+
+    def _abstract_task(self, task: str) -> str:
+        """태스크를 패턴으로 추상화"""
+        abstractions = {
+            'aitoolslab': '[blog]', 'nocodetoolslab': '[blog]',
+            'postpilot': '[saas]', 'quotepilot': '[saas]',
+            'browserpilot': '[saas]', 'agenthub': '[saas]',
+        }
+        result = task.lower()
+        for specific, abstract in abstractions.items():
+            result = result.replace(specific, abstract)
+        return result[:200]
+
+    def _extract_procedure(self, messages: list) -> str:
+        """성공한 태스크의 실행 절차를 텍스트로 추출"""
+        steps = []
+        step_num = 1
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get('role') == 'assistant':
+                content = msg.get('content', '')
+                try:
+                    parsed = json.loads(content) if content.startswith('{') else {}
+                    action = parsed.get('tool')
+                    if action and action != 'final_answer':
+                        steps.append(f"{step_num}. {action}: {str(parsed.get('input', ''))[:100]}")
+                        step_num += 1
+                except:
+                    pass
+        return "\n".join(steps) if steps else "절차 추출 실패"

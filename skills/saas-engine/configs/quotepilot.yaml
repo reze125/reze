@@ -1,0 +1,20 @@
+name: "QuotePilot"
+domain: "quotepilot.runstate.dev"
+pm2_name: "quotepilot-api"
+container_name: null
+db_type: "postgresql"
+db_name: "quotepilot_db"
+health_url: "http://localhost:8030/health"
+
+metrics:
+  track: ["mrr", "active_users", "churn_rate", "conversion"]
+  revenue_table: "subscriptions"
+  users_table: "users"
+
+payment:
+  provider: "lemon_squeezy"
+  plans: [19, 49, 99]
+
+monitoring:
+  check_interval: "6h"
+  alert_on: ["service_down", "db_connection_fail", "payment_error"]

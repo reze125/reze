@@ -395,3 +395,122 @@ JSON만 반환.
             "tech": tech_info["name"],
             "effective": True
         }))
+
+    # ============================================================
+    # v4.0 EvoPrompt + Workflow Evolution
+    # ============================================================
+
+    async def evolve_skill_prompt(self, skill_name: str) -> str:
+        """EvoPrompt: SKILL.md 프롬프트를 성과 데이터 기반으로 최적화."""
+        import os
+
+        # 1. 현재 프롬프트 로드
+        skill_md_path = REZE_ROOT / "skills" / skill_name / "SKILL.md"
+        if not skill_md_path.exists():
+            return f"Skill not found: {skill_name}"
+
+        current_prompt = skill_md_path.read_text()
+
+        # 2. 최근 성과 데이터
+        db = self.get_db()
+        performance = db.execute("""
+            SELECT task_pattern, score FROM plan_cache_v4
+            WHERE skills_used LIKE ? AND created_at > datetime('now', '-14 days')
+        """, [f'%{skill_name}%']).fetchall()
+
+        if not performance:
+            return f"No performance data for {skill_name}"
+
+        avg_score = sum(p[1] for p in performance) / len(performance)
+
+        # 3. 점수 0.85 이상이면 진화 불필요
+        if avg_score >= 0.85:
+            return f"No evolution needed (avg_score={avg_score:.2f})"
+
+        # 4. 프롬프트 개선안 생성
+        improved = await self.call_llm(
+            f"""현재 SKILL.md:
+{current_prompt[:2000]}
+
+최근 14일 성과:
+- 평균 점수: {avg_score:.2f}
+- 태스크 수: {len(performance)}
+- 낮은 점수 태스크: {[p for p in performance if p[1] < 0.7]}
+
+위 데이터를 바탕으로 프롬프트를 개선하시오.
+- 실패 패턴을 방지하는 구체적 지시 추가
+- 불필요한 부분 제거
+- 성공 패턴 강화
+
+개선된 전체 SKILL.md 텍스트를 출력하시오.""",
+            role="writing"
+        )
+
+        # 5. 안전 검증: git backup → 교체
+        tag = f"skill-evo-{skill_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        self._git_backup(tag, f"pre-skill-evolution: {skill_name}")
+
+        try:
+            # 기존 백업
+            backup_path = skill_md_path.with_suffix('.md.bak')
+            backup_path.write_text(current_prompt)
+
+            # 새 프롬프트 적용
+            skill_md_path.write_text(improved.strip() + "\n")
+
+            # 테스트 (간단한 문법 검증)
+            if "---" not in improved or "name:" not in improved:
+                # 롤백
+                skill_md_path.write_text(current_prompt)
+                return f"Evolution failed: invalid SKILL.md format"
+
+            self._git_commit(f"feat(skill-evolution): {skill_name} prompt optimized")
+
+            self.store_signal("skill_evolution_success", json.dumps({
+                "skill": skill_name,
+                "before_score": avg_score,
+                "tag": tag
+            }))
+
+            return f"Evolved {skill_name} (was {avg_score:.2f})"
+
+        except Exception as e:
+            # 롤백
+            self._rollback(tag)
+            return f"Evolution failed: {str(e)}"
+
+    async def evolve_workflow(self) -> str:
+        """크론잡 스케줄/순서/빈도를 성과 데이터 기반으로 최적화 제안."""
+        db = self.get_db()
+
+        # daemon_tasks에서 job 성과 수집
+        job_stats = db.execute("""
+            SELECT source as job_name,
+                   COUNT(*) as run_count,
+                   SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate
+            FROM daemon_tasks
+            WHERE completed_at > datetime('now', '-7 days')
+            GROUP BY source
+        """).fetchall()
+
+        if not job_stats:
+            return "No job stats available"
+
+        stats_text = "\n".join([
+            f"- {j[0]}: {j[1]}회 실행, 성공률 {j[2]:.0f}%"
+            for j in job_stats
+        ])
+
+        suggestions = await self.call_llm(
+            f"""크론잡 성과 데이터 (최근 7일):
+{stats_text}
+
+최적화 제안 (빈도 조정, 순서 변경, 제거 후보):""",
+            role="analysis"
+        )
+
+        self.store_signal("workflow_optimization_suggestion", json.dumps({
+            "suggestions": suggestions[:500]
+        }))
+
+        return suggestions

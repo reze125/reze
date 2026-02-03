@@ -1,0 +1,39 @@
+name: "NoCode Tools Lab"
+domain: "nocodetoolslab.com"
+db_name: "nocodetoolslab_db"
+db_table: "articles"
+pm2_name: "nocodetoolslab"
+
+content:
+  niche: "No-code and low-code tools reviews"
+  target_audience: "non-technical entrepreneurs and business users"
+  tone: "friendly and practical"
+  article_types:
+    - "tool_review"
+    - "comparison"
+    - "roundup"
+    - "tutorial"
+  min_words: 1500
+  max_words: 3000
+  posting_schedule: "mon,thu"
+
+seo:
+  primary_keywords: ["no-code tools", "low-code platforms", "best no-code"]
+  competitor_sites: ["nocode.tech", "makerpad.co"]
+  target_search_intent: "commercial investigation"
+
+affiliate:
+  programs: ["impact", "shareasale", "direct"]
+  link_density: 3
+
+quality:
+  min_score: 85
+  comparison_standard: "Zapier"
+
+branding:
+  primary_color: "#10B981"
+  logo_path: "/assets/nocodetoolslab-logo.png"
+
+monitoring:
+  analytics: "plausible"
+  health_check_url: "https://nocodetoolslab.com/api/health"

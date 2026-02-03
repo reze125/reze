@@ -274,6 +274,106 @@ class SSOT:
             updated_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_launches_status ON launches(status, target_date);
+
+        -- v4.0 신규 테이블
+
+        -- 자동 감지된 서비스
+        CREATE TABLE IF NOT EXISTS known_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            type TEXT NOT NULL,
+            port INTEGER,
+            domain TEXT,
+            config_path TEXT,
+            discovered_at TEXT DEFAULT (datetime('now')),
+            status TEXT DEFAULT 'active',
+            meta TEXT DEFAULT '{}'
+        );
+
+        -- v4.0 plan_cache (절차 캐싱)
+        CREATE TABLE IF NOT EXISTS plan_cache_v4 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_pattern TEXT NOT NULL,
+            skills_used TEXT,
+            procedure TEXT NOT NULL,
+            steps INTEGER,
+            tokens INTEGER,
+            score REAL DEFAULT 0.8,
+            created_at TEXT DEFAULT (datetime('now')),
+            used_count INTEGER DEFAULT 0,
+            last_used TEXT
+        );
+
+        -- v4.0 반성 저장 (Reflexion episodic memory)
+        CREATE TABLE IF NOT EXISTS reflections_v4 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_pattern TEXT NOT NULL,
+            failure_reason TEXT,
+            lesson TEXT NOT NULL,
+            suggested_approach TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- 리서치 인사이트
+        CREATE TABLE IF NOT EXISTS research_insights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area TEXT NOT NULL,
+            insight TEXT NOT NULL,
+            source_url TEXT,
+            applicability_score REAL,
+            applied BOOLEAN DEFAULT FALSE,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- 동적 생성 스킬 레지스트리
+        CREATE TABLE IF NOT EXISTS generated_skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT UNIQUE NOT NULL,
+            type TEXT NOT NULL,
+            skill_path TEXT NOT NULL,
+            operations TEXT,
+            creation_trigger TEXT,
+            test_passed BOOLEAN DEFAULT TRUE,
+            active BOOLEAN DEFAULT TRUE,
+            success_count INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            avg_score REAL DEFAULT 0.0,
+            created_at TEXT DEFAULT (datetime('now')),
+            last_used TEXT,
+            notes TEXT
+        );
+
+        -- 목표 트리
+        CREATE TABLE IF NOT EXISTS goal_tree (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal TEXT NOT NULL,
+            decomposition TEXT NOT NULL,
+            feasibility TEXT,
+            status TEXT DEFAULT 'active',
+            progress_pct REAL DEFAULT 0.0,
+            created_at TEXT DEFAULT (datetime('now')),
+            last_reviewed TEXT,
+            completed_at TEXT,
+            notes TEXT
+        );
+
+        -- 목표 하위 태스크
+        CREATE TABLE IF NOT EXISTS goal_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id INTEGER NOT NULL,
+            sub_goal TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            description TEXT,
+            skill_required TEXT,
+            priority TEXT DEFAULT 'P2',
+            status TEXT DEFAULT 'pending',
+            kpi TEXT,
+            actual_result TEXT,
+            scheduled_cron TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT,
+            FOREIGN KEY (goal_id) REFERENCES goal_tree(id)
+        );
         """)
         self.conn.commit()
 
@@ -754,6 +854,117 @@ class SSOT:
                 f"UPDATE launches SET {', '.join(updates)} WHERE id=?", tuple(params)
             )
             self.conn.commit()
+
+    # === v4.0 plan_cache 메서드 ===
+
+    def cache_plan_v4(self, task_pattern: str, skills_used: list,
+                      procedure: str, steps: int, tokens: int, score: float):
+        """성공한 태스크의 절차를 캐싱 (v4.0)."""
+        import json
+        self.conn.execute("""
+            INSERT INTO plan_cache_v4 (task_pattern, skills_used, procedure,
+                                      steps, tokens, score, created_at, used_count)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), 0)
+        """, [task_pattern, json.dumps(skills_used), procedure, steps, tokens, score])
+        self.conn.commit()
+
+    def find_cached_plan_v4(self, task: str, threshold: float = 0.6) -> Optional[dict]:
+        """유사 태스크의 캐싱된 절차 검색 (v4.0)."""
+        plans = self.conn.execute("""
+            SELECT task_pattern, procedure, score, used_count
+            FROM plan_cache_v4
+            WHERE created_at > datetime('now', '-30 days')
+            AND score >= ?
+            ORDER BY score DESC, used_count DESC
+            LIMIT 5
+        """, [threshold]).fetchall()
+        if not plans:
+            return None
+        return {
+            'task_pattern': plans[0][0],
+            'procedure': plans[0][1],
+            'score': plans[0][2],
+            'used_count': plans[0][3]
+        }
+
+    def increment_plan_usage_v4(self, task_pattern: str):
+        """plan_cache_v4 used_count 증가."""
+        self.conn.execute("""
+            UPDATE plan_cache_v4 SET used_count = used_count + 1,
+            last_used = datetime('now')
+            WHERE task_pattern = ?
+        """, [task_pattern])
+        self.conn.commit()
+
+    # === v4.0 reflections 메서드 ===
+
+    def save_reflection_v4(self, task_pattern: str, failure_reason: str,
+                           lesson: str, suggested_approach: str):
+        """실패 반성을 저장 (v4.0)."""
+        self.conn.execute("""
+            INSERT INTO reflections_v4 (task_pattern, failure_reason, lesson,
+                                       suggested_approach, created_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+        """, [task_pattern, failure_reason, lesson, suggested_approach])
+        self.conn.commit()
+
+    def get_recent_reflections_v4(self, limit: int = 5) -> list:
+        """최근 반성 조회 (v4.0)."""
+        rows = self.conn.execute("""
+            SELECT task_pattern, failure_reason, lesson, suggested_approach
+            FROM reflections_v4
+            WHERE created_at > datetime('now', '-30 days')
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, [limit]).fetchall()
+        return [{'task_pattern': r[0], 'failure_reason': r[1],
+                 'lesson': r[2], 'suggested_approach': r[3]} for r in rows]
+
+    # === v4.0 known_services 메서드 ===
+
+    def get_known_services(self) -> list:
+        """등록된 서비스 목록."""
+        rows = self.conn.execute(
+            "SELECT name FROM known_services WHERE status = 'active'"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def register_service(self, name: str, type_: str, port: int = None,
+                         domain: str = None, config_path: str = None, meta: dict = None):
+        """새 서비스 등록."""
+        import json
+        self.conn.execute("""
+            INSERT OR IGNORE INTO known_services (name, type, port, domain, config_path, meta)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [name, type_, port, domain, config_path, json.dumps(meta or {})])
+        self.conn.commit()
+
+    # === v4.0 count/budget 유틸 ===
+
+    def count_signals_v4(self, type_: str, days: int = 7) -> int:
+        """특정 타입의 최근 시그널 수."""
+        row = self.conn.execute("""
+            SELECT COUNT(*) FROM signals
+            WHERE kind = ? AND created_at > datetime('now', ? || ' days')
+        """, [type_, f'-{days}']).fetchone()
+        return row[0] if row else 0
+
+    def get_monthly_usage(self, provider: str) -> int:
+        """월간 토큰 사용량 조회."""
+        row = self.conn.execute("""
+            SELECT COALESCE(SUM(total_tokens), 0)
+            FROM daily_budget
+            WHERE date >= date('now', 'start of month')
+        """).fetchone()
+        return row[0] if row else 0
+
+    # === v4.0 signal 헬퍼 (기존 save_signal 래퍼) ===
+
+    def add_signal(self, type_: str, data: dict):
+        """signal 저장 (dict 입력 지원)."""
+        import json
+        data_str = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)
+        return self.save_signal(type_, data_str)
 
     # === 리소스 관리 ===
     def close(self) -> None:

@@ -1,0 +1,19 @@
+name: "PostPilot"
+domain: "postpilot.runstate.dev"
+pm2_name: "postpilot"
+container_name: null
+db_type: "postgresql"
+db_name: "postpilot_db"
+health_url: "https://postpilot.runstate.dev/api/health"
+
+metrics:
+  track: ["mrr", "active_users", "churn_rate", "conversion"]
+  revenue_table: "subscriptions"
+  users_table: "users"
+
+payment:
+  provider: "lemon_squeezy"
+
+monitoring:
+  check_interval: "6h"
+  alert_on: ["service_down", "db_connection_fail", "payment_error"]

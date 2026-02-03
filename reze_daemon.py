@@ -1512,6 +1512,269 @@ async def saas_monthly_report_job():
 
 
 # ============================================================
+# v4.0 신규 Jobs
+# ============================================================
+
+async def auto_discovery_job():
+    """매시간: 서버에 새로 등장한 서비스를 감지하고 자동 등록."""
+    logger.info("Running auto-discovery")
+    try:
+        known = state.ssot.get_known_services()
+        new_services = []
+
+        # 1. PM2 프로세스 스캔
+        try:
+            pm2_result = subprocess.run(
+                ["pm2", "jlist"], capture_output=True, text=True, timeout=30
+            )
+            if pm2_result.returncode == 0:
+                pm2_list = json.loads(pm2_result.stdout)
+                for proc in pm2_list:
+                    name = proc.get('name', '')
+                    status = proc.get('pm2_env', {}).get('status', '')
+                    if name and name not in known and status == 'online':
+                        new_services.append({
+                            'name': name,
+                            'type_hint': 'pm2',
+                            'port': proc.get('pm2_env', {}).get('PORT'),
+                            'cwd': proc.get('pm2_env', {}).get('pm_cwd', '')
+                        })
+        except Exception as e:
+            logger.warning(f"PM2 scan failed: {e}")
+
+        # 2. Docker 컨테이너 스캔
+        try:
+            docker_result = subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}\t{{.Image}}"],
+                capture_output=True, text=True, timeout=30
+            )
+            if docker_result.returncode == 0:
+                for line in docker_result.stdout.strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    parts = line.split('\t')
+                    name = parts[0]
+                    if name and name not in known:
+                        new_services.append({
+                            'name': name,
+                            'type_hint': 'docker',
+                            'port': parts[1] if len(parts) > 1 else None,
+                            'image': parts[2] if len(parts) > 2 else None
+                        })
+        except Exception as e:
+            logger.warning(f"Docker scan failed: {e}")
+
+        # 3. 새 서비스 발견 시 등록
+        for svc in new_services[:5]:  # 최대 5개만
+            try:
+                # LLM으로 서비스 유형 분류
+                classification = await state.router.call(
+                    "classification",
+                    [{"role": "user", "content": f"""서버에서 새 서비스 감지:
+이름: {svc['name']}
+타입: {svc['type_hint']}
+포트: {svc.get('port')}
+
+유형 하나만 답: blog / saas / api / tool / infra / unknown"""}]
+                )
+                svc_type = classification.text.strip().lower()
+                if svc_type not in ['blog', 'saas', 'api', 'tool', 'infra']:
+                    svc_type = 'unknown'
+
+                # SSOT 등록
+                state.ssot.register_service(
+                    name=svc['name'],
+                    type_=svc_type,
+                    port=svc.get('port'),
+                    meta=svc
+                )
+
+                # Discord 알림
+                if state.alert_manager:
+                    await state.alert_manager.send(
+                        "info", "auto_discovery",
+                        f"🔍 새 서비스 감지: **{svc['name']}** ({svc_type})"
+                    )
+                logger.info(f"Auto-discovered service: {svc['name']} ({svc_type})")
+            except Exception as e:
+                logger.warning(f"Service registration failed: {e}")
+
+        if new_services:
+            logger.info(f"Auto-discovery: found {len(new_services)} new services")
+    except Exception as e:
+        logger.error(f"Auto-discovery failed: {e}")
+
+
+async def self_improvement_research_job():
+    """매주 월요일 03:00: 약한 영역 파악 + 인터넷 리서치."""
+    logger.info("Running self-improvement research")
+    try:
+        # 1. 약한 영역 파악
+        db = state.ssot._get_db()
+        low_scores = db.execute("""
+            SELECT task_pattern, AVG(score) as avg_score
+            FROM plan_cache_v4
+            WHERE created_at > datetime('now', '-7 days')
+            GROUP BY task_pattern
+            HAVING avg_score < 0.8
+            ORDER BY avg_score ASC
+            LIMIT 3
+        """).fetchall()
+
+        repeated_failures = db.execute("""
+            SELECT task_pattern, COUNT(*) as fail_count
+            FROM reflections_v4
+            WHERE created_at > datetime('now', '-7 days')
+            GROUP BY task_pattern
+            HAVING fail_count >= 2
+            LIMIT 3
+        """).fetchall()
+
+        weak_areas = [r[0] for r in low_scores] + [r[0] for r in repeated_failures]
+
+        if not weak_areas:
+            if state.alert_manager:
+                await state.alert_manager.send(
+                    "info", "research", "📚 주간 리서치: 약한 영역 없음. 모든 영역 양호."
+                )
+            return
+
+        # 2. 인사이트 수집 (LLM 요약)
+        insights_count = 0
+        for area in weak_areas[:3]:
+            try:
+                summary = await state.router.call(
+                    "research",
+                    [{"role": "user", "content": f"""다음 영역에서 개선할 수 있는 best practice 3가지를 제안:
+영역: {area}
+
+실행 가능한 구체적 인사이트만 간결하게."""}]
+                )
+
+                db.execute("""
+                    INSERT INTO research_insights (area, insight, applicability_score)
+                    VALUES (?, ?, 0.7)
+                """, [area, summary.text[:500]])
+                insights_count += 1
+            except Exception as e:
+                logger.warning(f"Research failed for {area}: {e}")
+
+        db.commit()
+
+        if state.alert_manager:
+            await state.alert_manager.send(
+                "info", "research",
+                f"📚 주간 리서치 완료: {len(weak_areas)}개 약한 영역 분석, {insights_count}개 인사이트 수집"
+            )
+    except Exception as e:
+        logger.error(f"Self-improvement research failed: {e}")
+
+
+async def competitor_research_job():
+    """수/토 06:00: 블로그 경쟁사 콘텐츠 분석."""
+    logger.info("Running competitor research")
+    try:
+        blog_skill = state.skills.catalog.get('blog-engine')
+        if not blog_skill:
+            return
+
+        for config_name, blog_config in blog_skill.get('configs', {}).items():
+            if not blog_config:
+                continue
+            competitors = blog_config.get('seo', {}).get('competitor_sites', [])[:2]
+            if not competitors:
+                continue
+
+            for comp_url in competitors:
+                try:
+                    gap = await state.router.call(
+                        "research",
+                        [{"role": "user", "content": f"""경쟁사 {comp_url}의 최근 콘텐츠 주제를 분석하고,
+블로그 '{blog_config.get('name')}'에 없는 주제를 3개 제안.
+
+간결하게 주제명 + 검색 의도만."""}]
+                    )
+
+                    if state.alert_manager:
+                        await state.alert_manager.send(
+                            "info", "competitor_research",
+                            f"🏆 경쟁사 분석 [{config_name}]\n경쟁사: {comp_url}\n콘텐츠 갭:\n{gap.text[:400]}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Competitor research failed for {comp_url}: {e}")
+    except Exception as e:
+        logger.error(f"Competitor research failed: {e}")
+
+
+async def weekly_skill_evolution_job():
+    """매주 일요일 04:00: 스킬 프롬프트 자기 최적화."""
+    logger.info("Running weekly skill evolution")
+    try:
+        from self_evolution import SelfEvolution
+        se = SelfEvolution(
+            _call_llm_for_learning,
+            state.ssot.save_signal,
+            state.ssot._get_db
+        )
+
+        results = []
+        for skill_name in list(state.skills.catalog.keys())[:3]:  # 최대 3개
+            try:
+                if hasattr(se, 'evolve_skill_prompt'):
+                    result = await se.evolve_skill_prompt(skill_name)
+                    results.append(f"{skill_name}: {result}")
+            except Exception as e:
+                results.append(f"{skill_name}: error - {str(e)[:50]}")
+
+        if state.alert_manager and results:
+            await state.alert_manager.send(
+                "info", "skill_evolution",
+                f"🧬 주간 스킬 진화:\n" + "\n".join(results[:5])
+            )
+    except Exception as e:
+        logger.error(f"Weekly skill evolution failed: {e}")
+
+
+async def weekly_goal_review_job():
+    """매주 월요일 09:00: 목표 진행 리뷰."""
+    logger.info("Running weekly goal review")
+    try:
+        db = state.ssot._get_db()
+        active_goals = db.execute("""
+            SELECT id, goal, progress_pct FROM goal_tree
+            WHERE status = 'active'
+        """).fetchall()
+
+        if not active_goals:
+            if state.alert_manager:
+                await state.alert_manager.send(
+                    "info", "goal_review", "📋 주간 목표 리뷰: 활성 목표 없음"
+                )
+            return
+
+        report_parts = []
+        for goal_id, goal_text, progress in active_goals:
+            tasks = db.execute("""
+                SELECT task_name, status FROM goal_tasks WHERE goal_id = ?
+            """, [goal_id]).fetchall()
+
+            completed = sum(1 for t in tasks if t[1] == 'completed')
+            total = len(tasks)
+
+            report_parts.append(
+                f"📈 **{goal_text[:50]}** ({completed}/{total} 완료)"
+            )
+
+        if state.alert_manager:
+            await state.alert_manager.send(
+                "info", "goal_review",
+                f"📋 주간 목표 리뷰\n" + "\n".join(report_parts[:5])
+            )
+    except Exception as e:
+        logger.error(f"Weekly goal review failed: {e}")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
@@ -1630,6 +1893,27 @@ async def lifespan(app: FastAPI):
         saas_monthly_report_job, "cron", day=1, hour=10, minute=30,
         id="saas_monthly_report"
     )  # 매월 1일 10:30 KST
+
+    # v4.0 신규 스케줄
+    state.scheduler.add_job(
+        auto_discovery_job, "interval", hours=1, id="auto_discovery"
+    )  # 매시간 (health_check와 함께)
+    state.scheduler.add_job(
+        self_improvement_research_job, "cron", day_of_week="mon", hour=3, minute=0,
+        id="self_improvement_research"
+    )  # 매주 월요일 03:00
+    state.scheduler.add_job(
+        competitor_research_job, "cron", day_of_week="wed,sat", hour=6, minute=0,
+        id="competitor_research"
+    )  # 수/토 06:00
+    state.scheduler.add_job(
+        weekly_skill_evolution_job, "cron", day_of_week="sun", hour=4, minute=0,
+        id="weekly_skill_evolution"
+    )  # 매주 일요일 04:00
+    state.scheduler.add_job(
+        weekly_goal_review_job, "cron", day_of_week="mon", hour=9, minute=30,
+        id="weekly_goal_review"
+    )  # 매주 월요일 09:30
 
     state.scheduler.start()
 

@@ -1,0 +1,20 @@
+# 새 SaaS 추가 시 이 파일을 복사하고 값만 수정
+name: "Template SaaS"
+domain: "example.runstate.dev"
+pm2_name: "example-api"
+container_name: null
+db_type: "postgresql"
+db_name: "example_db"
+health_url: "https://example.runstate.dev/api/health"
+
+metrics:
+  track: ["mrr", "active_users", "churn_rate", "conversion"]
+  revenue_table: "subscriptions"
+  users_table: "users"
+
+payment:
+  provider: "lemon_squeezy"
+
+monitoring:
+  check_interval: "6h"
+  alert_on: ["service_down", "db_connection_fail", "payment_error"]
