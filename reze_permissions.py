@@ -438,3 +438,72 @@ BLOG_QUALITY_GATE = {
         FIX: {구체적 수정 방법}
     """,
 }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 학습 속도 정책 (Phase 3)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 7일 검증은 인간 기준. REZE는 24시간 깨어있다.
+# 즉시 확인 가능한 건 즉시. 진짜 시간 필요한 것만 기다린다.
+
+LEARNING_SPEED = {
+    # 즉시 (5분) — 변경 전후 벤치마크로 바로 확인 가능
+    "instant": {
+        "triggers": [
+            "self_improvement_tech",
+            "code_optimization",
+            "config_change",
+            "prompt_optimization",
+            "library_upgrade",
+        ],
+        "verify_after_minutes": 5,
+        "method": "benchmark_before_after",
+    },
+
+    # 빠름 (6시간) — 안정성 확인 필요
+    "fast": {
+        "triggers": [
+            "blog_published",
+            "seo_change",
+            "auto_fix_applied",
+            "workflow_change",
+            "new_skill_added",
+        ],
+        "verify_after_hours": 6,
+        "method": "compare_metrics",
+    },
+
+    # 하루 (24시간) — 외부 반응 필요
+    "daily": {
+        "triggers": [
+            "keyword_opportunity",
+            "competitor_response",
+            "blog_content_update",
+        ],
+        "verify_after_hours": 24,
+        "method": "daily_comparison",
+    },
+
+    # 주간 (7일) — 구글 순위처럼 진짜 시간이 걸리는 것만
+    "weekly": {
+        "triggers": [
+            "seo_ranking_change",
+            "domain_authority_change",
+        ],
+        "verify_after_days": 7,
+        "method": "weekly_trend",
+    },
+}
+
+
+def get_verification_delay(discovery_type: str) -> dict:
+    """발견 유형에 따른 검증 딜레이 반환."""
+    for speed, cfg in LEARNING_SPEED.items():
+        if discovery_type in cfg["triggers"]:
+            return {"speed": speed, **cfg}
+    return {"speed": "fast", "verify_after_hours": 6, "method": "compare_metrics"}
+
+
+# 메타학습 상수
+META_LEARNING_THRESHOLD = 30    # 교훈 30개 쌓이면 패턴 추출
+MAX_DAILY_LESSONS = 20          # 하루 교훈 최대 20개

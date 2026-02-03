@@ -233,6 +233,18 @@ async def judgment_job():
     """6시간마다: 최근 신호를 보고 '할 일 있나?' 판단. LLM 1회."""
     logger.info("Running judgment engine")
     try:
+        # Phase 3: 가속 검증 - 기한 도래한 발견 즉시 검증
+        try:
+            from accelerated_learning import AcceleratedLearning
+            learner = AcceleratedLearning(
+                _call_llm_for_learning,
+                state.ssot.save_signal,
+                state.ssot._get_db
+            )
+            await learner.verify_due()
+        except Exception as e:
+            logger.warning(f"Accelerated verification failed: {e}")
+
         # 최근 6시간 신호 수집
         signals = state.ssot.get_recent_signals(hours=6)
         if not signals:
@@ -558,6 +570,18 @@ async def process_discovery(discovery_type: str, source_skill: str, detail: dict
         urgency=detail.get("urgency", "medium")
     )
 
+    # Phase 3: 가속 검증 스케줄링 (7일 고정 대신 LEARNING_SPEED 기반)
+    try:
+        from accelerated_learning import AcceleratedLearning
+        learner = AcceleratedLearning(
+            _call_llm_for_learning,
+            state.ssot.save_signal,
+            state.ssot._get_db
+        )
+        await learner.schedule_verification(discovery_id, discovery_type)
+    except Exception as e:
+        logger.warning(f"Accelerated verification scheduling failed: {e}")
+
     # 2. Interpret & Connect using CONNECTION_MAP
     connection = config.CONNECTION_MAP.get(discovery_type)
     if not connection:
@@ -655,11 +679,28 @@ async def trend_scan_job():
 
         # 발견 처리
         for d in discoveries:
-            await process_discovery(
-                d.get("type", "new_tool_discovered"),
-                "trend_scan",
-                d
-            )
+            disc_type = d.get("type", "new_tool_discovered")
+            await process_discovery(disc_type, "trend_scan", d)
+
+            # Phase 3: self_improvement_tech 발견 시 자기 진화 시도
+            if disc_type == "self_improvement_tech" and d.get("tool_name"):
+                try:
+                    from self_evolution import SelfEvolution
+                    evolver = SelfEvolution(
+                        _call_llm_for_learning,
+                        state.ssot.save_signal,
+                        state.ssot._get_db
+                    )
+                    tech_info = {
+                        "name": d.get("tool_name", "unknown")[:50],
+                        "description": d.get("summary", "")[:200],
+                        "source": "trend_scan"
+                    }
+                    evo_result = await evolver.evaluate_and_evolve(tech_info)
+                    if evo_result.get("success"):
+                        logger.info(f"Auto-evolution: {tech_info['name']}")
+                except Exception as e:
+                    logger.warning(f"Self-evolution from trend scan failed: {e}")
 
         state.ssot.save_signal("trend_scan_complete", json.dumps({
             "discoveries": len(discoveries),
@@ -1034,6 +1075,167 @@ async def security_scan_job():
 
 
 # ============================================================
+# Phase 3: Self-Evolution & Accelerated Learning Jobs
+# ============================================================
+
+async def _call_llm_for_learning(prompt: str, role: str = "reasoning") -> str:
+    """학습/진화 모듈용 LLM 호출 헬퍼."""
+    response = await state.router.call(
+        role,
+        [{"role": "user", "content": prompt}],
+        system="REZE 자기 진화 및 학습 시스템."
+    )
+    return response.text
+
+
+async def self_assessment_job():
+    """
+    매주 금 15시: REZE 자기 평가.
+    - 이번 주 진화 결과 리뷰
+    - 내 코드 약점 분석
+    - 메타학습 실행
+    """
+    logger.info("=== Self Assessment Start ===")
+
+    from self_evolution import SelfEvolution
+    from accelerated_learning import AcceleratedLearning
+
+    evolver = SelfEvolution(
+        _call_llm_for_learning,
+        state.ssot.save_signal,
+        state.ssot._get_db
+    )
+    learner = AcceleratedLearning(
+        _call_llm_for_learning,
+        state.ssot.save_signal,
+        state.ssot._get_db
+    )
+
+    db = state.ssot._get_db()
+
+    # 이번 주 진화 결과
+    evolutions = db.execute(
+        """SELECT tech_name, status, performance_before, performance_after
+           FROM evolutions WHERE created_at > datetime('now', '-7 days')"""
+    ).fetchall()
+
+    success = sum(1 for e in evolutions if e[1] == 'success')
+    failed = sum(1 for e in evolutions if e[1] == 'failed')
+
+    # 이번 주 교훈 수
+    lessons_count = db.execute(
+        "SELECT COUNT(*) FROM signals WHERE kind='lesson_learned' AND created_at > datetime('now', '-7 days')"
+    ).fetchone()[0]
+
+    # 자기 분석
+    self_state = evolver._analyze_self()
+
+    assessment = await _call_llm_for_learning(
+        f"""REZE 자기 평가.
+
+내 코드: {self_state['python_files']}
+총 코드: {self_state['total_lines']}줄
+의존성: {self_state['dependencies'][:15]}
+이번 주: 진화 성공 {success}, 실패 {failed}, 교훈 {lessons_count}개
+
+1. 내 코드에서 병목이 될 곳은?
+2. 없는 의존성 중 있으면 좋을 것은?
+3. 다음 주 자기 개선 우선순위 3가지
+
+JSON:
+{{
+    "bottlenecks": ["..."],
+    "missing_deps": [{{"name": "...", "benefit": "..."}}],
+    "evolution_rate": "{success}/{success+failed}",
+    "next_improvements": [{{"name": "...", "description": "...", "priority": 1}}]
+}}
+JSON만 반환.
+""",
+        role="reasoning"
+    )
+
+    # JSON 파싱
+    text = assessment.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+
+    try:
+        result = json.loads(text.strip())
+    except:
+        result = {"raw": assessment[:500]}
+
+    # 우선순위 높은 개선점 -> 자기 진화 시도
+    for imp in result.get("next_improvements", []):
+        if imp.get("priority", 5) <= 2:
+            try:
+                eval_result = await evolver.evaluate({
+                    "name": imp["name"],
+                    "description": imp.get("description", ""),
+                    "source": "self_assessment"
+                })
+                if eval_result.get("should_apply") and eval_result.get("risk_level") != "high":
+                    await evolver.evolve(
+                        {"name": imp["name"], "description": imp.get("description", "")},
+                        eval_result
+                    )
+            except Exception as e:
+                logger.warning(f"Self-evolution from assessment failed: {e}")
+
+    # 메타학습 트리거
+    await learner.meta_learn()
+
+    state.ssot.save_signal("self_assessment", json.dumps({
+        "evolutions": {"success": success, "failed": failed},
+        "lessons": lessons_count,
+        "assessment": result
+    }))
+
+    logger.info("=== Self Assessment Complete ===")
+
+
+async def cost_review_job():
+    """매월 1일 09시: 비용 분석."""
+    logger.info("=== Cost Review Start ===")
+
+    db = state.ssot._get_db()
+
+    month_evolutions = db.execute(
+        "SELECT COUNT(*) FROM evolutions WHERE created_at > datetime('now', '-30 days')"
+    ).fetchone()[0]
+
+    month_blogs = db.execute(
+        "SELECT COUNT(*) FROM signals WHERE kind='blog_published' AND created_at > datetime('now', '-30 days')"
+    ).fetchone()[0]
+
+    month_discoveries = db.execute(
+        "SELECT COUNT(*) FROM discoveries WHERE created_at > datetime('now', '-30 days')"
+    ).fetchone()[0]
+
+    analysis = await _call_llm_for_learning(
+        f"""REZE 월간 비용 분석.
+진화: {month_evolutions}회, 블로그: {month_blogs}개, 발견: {month_discoveries}건
+API: Groq(무료), Gemini(무료), Cerebras(무료), Tavily(무료 1000/월)
+서버: Contabo VPS(고정)
+비용 최적화 제안. JSON: {{"estimated_cost": "$X", "optimizations": ["제안"]}}
+JSON만 반환.""",
+        role="reasoning"
+    )
+
+    state.ssot.save_signal("cost_review", json.dumps({"analysis": analysis}))
+
+    msg = f"**월간 비용**\n진화:{month_evolutions} | 블로그:{month_blogs} | 발견:{month_discoveries}\n{analysis[:500]}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(config.DISCORD_WEBHOOK_DAILY, json={"content": msg[:1900]})
+    except Exception as e:
+        logger.warning(f"Cost review Discord notification failed: {e}")
+
+    logger.info("=== Cost Review Complete ===")
+
+
+# ============================================================
 # Lifespan — 초기화 + 종료
 # ============================================================
 @asynccontextmanager
@@ -1097,6 +1299,14 @@ async def lifespan(app: FastAPI):
     state.scheduler.add_job(
         security_scan_job, "cron", day_of_week="sat", hour=3, minute=0, id="security_scan"
     )  # 토요일 03:00
+
+    # Phase 3: Self-Evolution & Learning Jobs
+    state.scheduler.add_job(
+        self_assessment_job, "cron", day_of_week="fri", hour=15, minute=0, id="self_assessment"
+    )  # 금요일 15:00
+    state.scheduler.add_job(
+        cost_review_job, "cron", day=1, hour=9, minute=0, id="cost_review"
+    )  # 매월 1일 09:00
 
     state.scheduler.start()
 
