@@ -670,6 +670,10 @@ class REZECore:
                 break
 
             # --- LLM 호출 ---
+            # 메시지 truncation (128K 컨텍스트 초과 방지)
+            if len(messages) > 10:
+                messages = [messages[0]] + messages[-8:]
+
             try:
                 response = await self.router.call(
                     "tool_call", messages, system=system_prompt, trace_id=trace_id
