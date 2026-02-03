@@ -105,7 +105,7 @@ async def status():
     from ssot import SSOT
 
     ssot = SSOT()
-    db = ssot._get_db()
+    db = ssot.conn
 
     skills_count = len(list(Path.home().joinpath("reze-agent/skills").iterdir()))
 
@@ -120,6 +120,8 @@ async def status():
     lessons_today = db.execute(
         "SELECT COUNT(*) FROM signals WHERE kind='lesson_learned' AND created_at > datetime('now', '-1 day')"
     ).fetchone()[0]
+
+    ssot.close()
 
     return {
         "skills": skills_count,
