@@ -64,10 +64,11 @@ class UniversalPlanner:
 
     MAX_REPLANS = 2
 
-    def __init__(self, ssot, tools, call_llm_fn):
+    def __init__(self, ssot, tools, call_llm_fn, plan_memory=None):
         self.ssot = ssot
         self.tools = tools
         self.llm = call_llm_fn
+        self.plan_memory = plan_memory  # v5.0 Phase 4
 
     async def plan(self, task, context=None):
         """태스크에 대한 실행 계획 생성."""
@@ -83,8 +84,14 @@ class UniversalPlanner:
         similar = self.ssot.find_similar_plans(task, top_k=2)
         similar_text = json.dumps(similar, ensure_ascii=False)[:800] if similar else "없음"
 
+        # v5.0 Phase 4: 과거 경험 컨텍스트 주입
+        experience_context = ""
+        if self.plan_memory:
+            experience_context = self.plan_memory.recall_for_task(task)
+
         prompt = f"""## 태스크
 {task}
+{experience_context}
 
 ## 서버 서비스
 {svc_summary}
@@ -147,12 +154,13 @@ class UniversalPlanner:
 class TaskExecutor:
     """계획의 각 단계를 도구로 실행."""
 
-    def __init__(self, ssot, tools, planner, call_llm_fn, feedback=None):
+    def __init__(self, ssot, tools, planner, call_llm_fn, feedback=None, plan_memory=None):
         self.ssot = ssot
         self.tools = tools
         self.planner = planner
         self.llm = call_llm_fn
         self.feedback = feedback  # v5.0 Phase 3
+        self.plan_memory = plan_memory  # v5.0 Phase 4
 
     async def execute(self, plan, task_id=None, source="planner"):
         """계획 실행."""
@@ -228,7 +236,8 @@ class TaskExecutor:
         status = "completed" if ok == len(plan.steps) else "partial" if ok > 0 else "failed"
         self.ssot.update_plan_progress(plan_id, ok, status)
 
-        return {
+        # 결과 준비
+        execution_result = {
             "goal": plan.goal,
             "task_type": plan.task_type,
             "status": status,
@@ -238,6 +247,21 @@ class TaskExecutor:
             "verify": verify,
             "replans": plan.replans
         }
+
+        # v5.0 Phase 4: 실행 결과에서 경험 추출
+        if self.plan_memory:
+            try:
+                score = ok / len(plan.steps) if plan.steps else None
+                await self.plan_memory.extract_from_execution(
+                    task_spec=plan.goal,
+                    plan=plan.to_json(),
+                    result=execution_result,
+                    score=score
+                )
+            except Exception as e:
+                logger.warning(f"PlanMemory extraction failed: {e}")
+
+        return execution_result
 
     def _resolve(self, data, step_results):
         """이전 단계 결과를 주입 ({step_N_result})."""

@@ -571,6 +571,38 @@ class SSOT:
         );
         CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_queue(status);
         CREATE INDEX IF NOT EXISTS idx_feedback_check ON feedback_queue(check_after);
+
+        -- v5.0 Phase 4: Config 변경 이력 추적
+        CREATE TABLE IF NOT EXISTS config_change_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_key TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT NOT NULL,
+            risk_level TEXT NOT NULL CHECK(risk_level IN ('SAFE', 'RISKY', 'DANGEROUS')),
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'applied', 'rolled_back', 'rejected')),
+            before_metric TEXT,
+            after_metric TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            applied_at TEXT,
+            approved_by TEXT
+        );
+
+        -- v5.0 Phase 4: 계층적 경험 메모리 (MUSE 패턴)
+        -- strategic: 높은 추상화 교훈 ("PM2 서비스는 restart 후 안정화 시간 필요")
+        -- procedural: 성공한 절차 패턴 ("nginx: test → reload → health check")
+        -- tool: 도구 효과성 기록 ("shell_pipe가 PM2 작업에 최적")
+        CREATE TABLE IF NOT EXISTS plan_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_type TEXT NOT NULL CHECK(memory_type IN ('strategic', 'procedural', 'tool')),
+            content TEXT NOT NULL,
+            source_task TEXT,
+            source_plan_hash TEXT,
+            relevance_tags TEXT,
+            use_count INTEGER DEFAULT 0,
+            last_used_at TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         self.conn.commit()
 
@@ -1733,6 +1765,123 @@ class SSOT:
             GROUP BY task_type
         """, (f"-{days} days",)).fetchall()
         return [dict(r) for r in rows]
+
+    # ========== v5.0 Phase 4: Config Change Log 메서드 ==========
+
+    def propose_config_change(self, config_key: str, old_value: str,
+                               new_value: str, reason: str,
+                               risk_level: str) -> int:
+        """config 변경 제안. SAFE는 바로 applied, RISKY/DANGEROUS는 pending."""
+        status = 'applied' if risk_level == 'SAFE' else 'pending'
+        cur = self.conn.execute("""
+            INSERT INTO config_change_log
+            (config_key, old_value, new_value, reason, risk_level, status, applied_at)
+            VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? = 'SAFE' THEN datetime('now') ELSE NULL END)
+        """, (config_key, old_value, new_value, reason, risk_level, status, risk_level))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def approve_config_change(self, change_id: int, approved_by: str = 'boss') -> bool:
+        """보스가 RISKY/DANGEROUS 변경을 승인."""
+        self.conn.execute("""
+            UPDATE config_change_log
+            SET status = 'approved', approved_by = ?, applied_at = datetime('now')
+            WHERE id = ? AND status = 'pending'
+        """, (approved_by, change_id))
+        self.conn.commit()
+        return self.conn.total_changes > 0
+
+    def reject_config_change(self, change_id: int) -> bool:
+        """보스가 변경을 거부."""
+        self.conn.execute("""
+            UPDATE config_change_log SET status = 'rejected' WHERE id = ? AND status = 'pending'
+        """, (change_id,))
+        self.conn.commit()
+        return self.conn.total_changes > 0
+
+    def rollback_config_change(self, change_id: int) -> dict | None:
+        """적용된 변경을 롤백. old_value 반환."""
+        row = self.conn.execute("""
+            SELECT config_key, old_value FROM config_change_log
+            WHERE id = ? AND status IN ('applied', 'approved')
+        """, (change_id,)).fetchone()
+        if not row:
+            return None
+        self.conn.execute("""
+            UPDATE config_change_log SET status = 'rolled_back' WHERE id = ?
+        """, (change_id,))
+        self.conn.commit()
+        return {"config_key": row[0], "old_value": row[1]}
+
+    def get_pending_config_changes(self) -> list:
+        """보스 승인 대기 중인 변경 목록."""
+        rows = self.conn.execute("""
+            SELECT id, config_key, old_value, new_value, reason, risk_level, created_at
+            FROM config_change_log WHERE status = 'pending'
+            ORDER BY created_at
+        """).fetchall()
+        return [{"id": r[0], "key": r[1], "old": r[2], "new": r[3],
+                 "reason": r[4], "risk": r[5], "created": r[6]} for r in rows]
+
+    def get_config_change_history(self, limit: int = 20) -> list:
+        """최근 config 변경 이력."""
+        rows = self.conn.execute("""
+            SELECT id, config_key, old_value, new_value, reason, risk_level,
+                   status, before_metric, after_metric, created_at, applied_at
+            FROM config_change_log ORDER BY created_at DESC LIMIT ?
+        """, (limit,)).fetchall()
+        return [{"id": r[0], "key": r[1], "old": r[2], "new": r[3], "reason": r[4],
+                 "risk": r[5], "status": r[6], "before": r[7], "after": r[8],
+                 "created": r[9], "applied": r[10]} for r in rows]
+
+    def update_config_metrics(self, change_id: int, before_metric: str, after_metric: str):
+        """적용 전후 메트릭 기록 (효과 측정용)."""
+        self.conn.execute("""
+            UPDATE config_change_log SET before_metric = ?, after_metric = ?
+            WHERE id = ?
+        """, (before_metric, after_metric, change_id))
+        self.conn.commit()
+
+    # ========== v5.0 Phase 4: Plan Memory (MUSE 3계층) 메서드 ==========
+
+    def store_memory(self, memory_type: str, content: str,
+                     source_task: str = None, source_plan_hash: str = None,
+                     relevance_tags: str = None) -> int:
+        """경험 메모리 저장."""
+        cur = self.conn.execute("""
+            INSERT INTO plan_memory (memory_type, content, source_task, source_plan_hash, relevance_tags)
+            VALUES (?, ?, ?, ?, ?)
+        """, (memory_type, content, source_task, source_plan_hash, relevance_tags))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def search_memory(self, memory_type: str, keyword: str, limit: int = 5) -> list:
+        """키워드로 관련 메모리 검색."""
+        rows = self.conn.execute("""
+            SELECT id, content, source_task, relevance_tags, use_count, created_at
+            FROM plan_memory
+            WHERE memory_type = ? AND (content LIKE ? OR relevance_tags LIKE ?)
+            ORDER BY use_count DESC, created_at DESC
+            LIMIT ?
+        """, (memory_type, f"%{keyword}%", f"%{keyword}%", limit)).fetchall()
+        return [{"id": r[0], "content": r[1], "source_task": r[2],
+                 "tags": r[3], "use_count": r[4], "created": r[5]} for r in rows]
+
+    def touch_memory(self, memory_id: int):
+        """메모리 사용 시 use_count 증가 + last_used_at 갱신."""
+        self.conn.execute("""
+            UPDATE plan_memory SET use_count = use_count + 1, last_used_at = datetime('now')
+            WHERE id = ?
+        """, (memory_id,))
+        self.conn.commit()
+
+    def get_memory_stats(self) -> dict:
+        """메모리 통계."""
+        rows = self.conn.execute("""
+            SELECT memory_type, COUNT(*), SUM(use_count)
+            FROM plan_memory GROUP BY memory_type
+        """).fetchall()
+        return {r[0]: {"count": r[1], "total_uses": r[2] or 0} for r in rows}
 
     # === 리소스 관리 ===
     def close(self) -> None:

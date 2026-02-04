@@ -63,6 +63,10 @@ from worker_pool import WorkerPool
 from config import (WORKER_MAX_CONCURRENT, FEEDBACK_CHECK_INTERVAL_HOURS,
                     TASK_PROCESSOR_INTERVAL_MINUTES)
 
+# v5.0 Phase 4 imports
+from config_tuner import ConfigTuner
+from plan_memory import PlanMemory
+
 import logging
 
 # === 로깅 설정 ===
@@ -113,6 +117,9 @@ class AppState:
     # v5.0 Phase 3
     feedback: FeedbackEngine = None
     worker_pool: WorkerPool = None
+    # v5.0 Phase 4
+    config_tuner: ConfigTuner = None
+    plan_memory: PlanMemory = None
 
 state = AppState()
 
@@ -1000,6 +1007,38 @@ async def daemon_task_processor_job():
 
     except Exception as e:
         logger.error(f"Daemon task processor error: {e}")
+
+
+async def config_tuner_job():
+    """주 1회 실행: config 값 자동 조정 사이클."""
+    try:
+        if not state.config_tuner:
+            return
+        result = await state.config_tuner.run_cycle()
+        logger.info(f"ConfigTuner result: {result}")
+
+        if result.get("pending_approval"):
+            pending = state.ssot.get_pending_config_changes()
+            for p in pending:
+                logger.warning(
+                    f"⚠️ CONFIG APPROVAL NEEDED: #{p['id']} "
+                    f"{p['key']} {p['old']}→{p['new']} [{p['risk']}] "
+                    f"Reason: {p['reason']}"
+                )
+    except Exception as e:
+        logger.error(f"ConfigTuner job failed: {e}")
+
+
+async def memory_cleanup_job():
+    """월 1회: 안 쓰이는 메모리 정리."""
+    try:
+        if not state.plan_memory:
+            return
+        cleaned = state.plan_memory.cleanup_stale(unused_days=30)
+        stats = state.ssot.get_memory_stats()
+        logger.info(f"Memory cleanup: removed {cleaned}, stats: {stats}")
+    except Exception as e:
+        logger.error(f"Memory cleanup failed: {e}")
 
 
 async def keyword_scan_job():
@@ -2345,10 +2384,16 @@ async def lifespan(app: FastAPI):
         call_llm_fn=_call_llm_for_learning,
         discord_notify=_discord_notify_fn,
     )
+
+    # v5.0 Phase 4: PlanMemory 먼저 초기화 (Planner에 주입)
+    state.plan_memory = PlanMemory(ssot=state.ssot, llm_fn=_call_llm_for_learning)
+    state.config_tuner = ConfigTuner(ssot=state.ssot, llm_fn=_call_llm_for_learning)
+
     state.planner = UniversalPlanner(
         ssot=state.ssot,
         tools=state.tools,
         call_llm_fn=_call_llm_for_learning,
+        plan_memory=state.plan_memory,  # v5.0 Phase 4
     )
     # v5.0 Phase 3 (init before PlanExecutor so feedback can be passed)
     state.feedback = FeedbackEngine(ssot=state.ssot, tools=state.tools)
@@ -2360,8 +2405,9 @@ async def lifespan(app: FastAPI):
         planner=state.planner,
         call_llm_fn=_call_llm_for_learning,
         feedback=state.feedback,  # v5.0 Phase 3
+        plan_memory=state.plan_memory,  # v5.0 Phase 4
     )
-    logger.info("v5.0 SOVEREIGN: Discovery + Planner + Feedback + WorkerPool initialized")
+    logger.info("v5.0 SOVEREIGN: Discovery + Planner + Feedback + WorkerPool + ConfigTuner + PlanMemory initialized")
 
     # 스케줄러
     state.scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
@@ -2374,6 +2420,11 @@ async def lifespan(app: FastAPI):
     state.scheduler.add_job(daemon_task_processor_job, "interval",
                             minutes=TASK_PROCESSOR_INTERVAL_MINUTES,
                             id="daemon_task_processor")  # v5.0 Phase 3
+    # v5.0 Phase 4 jobs
+    state.scheduler.add_job(config_tuner_job, 'interval', hours=168,  # 주 1회 (7일)
+                            id='config_tuner', next_run_time=None)  # 첫 실행은 수동
+    state.scheduler.add_job(memory_cleanup_job, 'interval', hours=720,  # 월 1회 (30일)
+                            id='memory_cleanup')
     state.scheduler.add_job(self_review_job, "cron", day_of_week="mon", hour=9, id="self_review")
 
     # v3.3 신규 스케줄
@@ -2733,3 +2784,64 @@ async def trigger_judgment(_=Depends(verify_token)):
     """즉시 판단 엔진 실행 (테스트용)."""
     await judgment_job()
     return {"status": "judgment executed"}
+
+
+# ========== v5.0 Phase 4: Config Tuner + Memory API ==========
+
+@app.get("/config/pending")
+async def get_pending_configs(_=Depends(verify_token)):
+    """보스 승인 대기 중인 config 변경 목록."""
+    return state.ssot.get_pending_config_changes()
+
+
+@app.post("/config/approve/{change_id}")
+async def approve_config(change_id: int, _=Depends(verify_token)):
+    """config 변경 승인 + 적용."""
+    success = state.ssot.approve_config_change(change_id)
+    if success:
+        state.config_tuner.apply_change(change_id)
+        return {"status": "approved_and_applied", "id": change_id}
+    return {"status": "not_found_or_already_processed", "id": change_id}
+
+
+@app.post("/config/reject/{change_id}")
+async def reject_config(change_id: int, _=Depends(verify_token)):
+    """config 변경 거부."""
+    state.ssot.reject_config_change(change_id)
+    return {"status": "rejected", "id": change_id}
+
+
+@app.post("/config/rollback/{change_id}")
+async def rollback_config(change_id: int, _=Depends(verify_token)):
+    """적용된 config 변경 롤백."""
+    success = state.config_tuner.rollback(change_id)
+    return {"status": "rolled_back" if success else "failed", "id": change_id}
+
+
+@app.post("/config-tuner/run")
+async def run_config_tuner(_=Depends(verify_token)):
+    """ConfigTuner 수동 실행."""
+    if not state.config_tuner:
+        raise HTTPException(status_code=503, detail="ConfigTuner not initialized")
+    result = await state.config_tuner.run_cycle()
+    return result
+
+
+@app.get("/config/history")
+async def get_config_history(_=Depends(verify_token), limit: int = 20):
+    """최근 config 변경 이력."""
+    return state.ssot.get_config_change_history(limit=limit)
+
+
+@app.get("/memory/stats")
+async def get_memory_stats(_=Depends(verify_token)):
+    """PlanMemory 통계."""
+    return state.ssot.get_memory_stats()
+
+
+@app.get("/memory/search")
+async def search_memory(memory_type: str, keyword: str, _=Depends(verify_token), limit: int = 10):
+    """메모리 검색."""
+    if memory_type not in ("strategic", "procedural", "tool"):
+        raise HTTPException(status_code=400, detail="Invalid memory_type. Use: strategic, procedural, tool")
+    return state.ssot.search_memory(memory_type, keyword, limit=limit)
