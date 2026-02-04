@@ -48,7 +48,10 @@ class CredentialStore:
 
 
 class ToolExecutor:
-    """5개 도구 실행기. 권한 검사 → 실행 → 마스킹."""
+    """6개 도구 실행기. 권한 검사 → 실행 → 마스킹."""
+
+    # v6.0: 동적 스킬용 제한 도구 세트
+    DYNAMIC_SKILL_TOOLS = {"web_search", "web_fetch", "file_read", "python_exec"}
 
     def __init__(self, ssot: SSOT, permissions: PermissionSystem):
         self.ssot = ssot
@@ -61,6 +64,8 @@ class ToolExecutor:
             [config.TAVILY_API_KEY] if config.TAVILY_API_KEY else []
         )
         self._tavily_idx = 0
+        # v6.0: MCP 클라이언트 저장소
+        self.mcp_clients: dict = {}
 
     async def execute(self, tool: str, tool_input: Any, source: str = "api") -> str:
         """도구 실행 메인 진입점."""
@@ -290,7 +295,7 @@ class ToolExecutor:
         except Exception as e:
             return f"ERROR: {e}"
 
-    def _exec_code_edit(self, request: Any) -> str:
+    def _exec_code_edit(self, request: Any, source: str = "api") -> str:
         """파일 읽기/수정/생성 도구."""
         import os
 
@@ -299,6 +304,18 @@ class ToolExecutor:
 
         action = request.get("action", "read")
         path = request.get("path", "")
+
+        # v6.0 Phase 2D-2: 쓰기/수정 시 VIGIL 검사
+        if action in ("edit", "create"):
+            try:
+                from manus.vigil import get_vigil
+                vigil = get_vigil(self.ssot)
+                content = request.get("content", "") or request.get("new_str", "")
+                vigil_result = vigil.check_file_content(path, content, source)
+                if not vigil_result.allowed:
+                    return f"BLOCKED by VIGIL: {vigil_result.reason}"
+            except ImportError:
+                pass  # VIGIL 모듈 없으면 스킵
 
         # 경로 보안 체크
         real_path = os.path.realpath(path) if path else ""
@@ -394,3 +411,233 @@ class ToolExecutor:
    create: {"action": "create", "path": "파일경로", "content": "내용"}
    list: {"action": "list", "path": "디렉토리경로"}
    허용경로: /home/reze/reze-agent/, /home/reze/blogs/, /home/reze/projects/, /tmp/reze/"""
+
+    # === v6.0: 제한된 도구 실행 (동적 스킬용) ===
+
+    async def execute_restricted(
+        self,
+        tool: str,
+        tool_input: Any,
+        allowed_tools: set = None,
+        source: str = "dynamic_skill"
+    ) -> str:
+        """
+        제한된 도구만 허용하는 실행 메서드 (동적 스킬용).
+
+        Args:
+            tool: 실행할 도구 이름
+            tool_input: 도구 입력
+            allowed_tools: 허용된 도구 집합 (None이면 DYNAMIC_SKILL_TOOLS 사용)
+            source: 실행 소스
+
+        Returns:
+            도구 실행 결과
+        """
+        if allowed_tools is None:
+            allowed_tools = self.DYNAMIC_SKILL_TOOLS
+
+        # 도구 허용 여부 검사
+        if tool not in allowed_tools:
+            return f"BLOCKED: Tool '{tool}' not allowed. Allowed: {sorted(allowed_tools)}"
+
+        # file_read → code_edit의 read 모드로 매핑
+        if tool == "file_read":
+            if isinstance(tool_input, str):
+                request = {"action": "read", "path": tool_input}
+            elif isinstance(tool_input, dict):
+                request = {"action": "read", "path": tool_input.get("path", ""), "line_range": tool_input.get("line_range")}
+            else:
+                return "ERROR: file_read requires path string or dict with 'path'"
+            return self._exec_code_edit(request)
+
+        # python_exec → python으로 매핑
+        if tool == "python_exec":
+            return self.repl.execute(str(tool_input))
+
+        # 그 외 도구는 기존 execute 사용 (권한 검사 포함)
+        return await self.execute(tool, tool_input, source)
+
+    def get_restricted_catalog(self, allowed_tools: set = None) -> str:
+        """제한된 도구 카탈로그 생성 (동적 스킬용)."""
+        if allowed_tools is None:
+            allowed_tools = self.DYNAMIC_SKILL_TOOLS
+
+        catalog_parts = ["사용 가능한 도구:\n"]
+
+        if "web_search" in allowed_tools:
+            catalog_parts.append("""
+1. web_search: 웹 검색 (Tavily)
+   입력: 검색 쿼리 문자열
+   출력: 상위 5개 결과 (제목, URL, 요약)
+   예: "AI agent frameworks 2024"
+""")
+
+        if "web_fetch" in allowed_tools:
+            catalog_parts.append("""
+2. web_fetch: 웹페이지 텍스트 추출
+   입력: URL 문자열 또는 {"url": "..."}
+   출력: 페이지 텍스트 (최대 5000자)
+   예: "https://example.com/article"
+""")
+
+        if "file_read" in allowed_tools:
+            catalog_parts.append("""
+3. file_read: 파일 읽기 (읽기 전용)
+   입력: 파일 경로 문자열 또는 {"path": "...", "line_range": [시작, 끝]}
+   출력: 파일 내용 (줄 번호 포함, 최대 5000자)
+   허용경로: /home/reze/reze-agent/, /home/reze/blogs/, /home/reze/projects/, /tmp/reze/
+   예: "/home/reze/reze-agent/config.py"
+""")
+
+        if "python_exec" in allowed_tools:
+            catalog_parts.append("""
+4. python_exec: Python 코드 실행
+   입력: 코드 문자열
+   허용 import: json, re, math, datetime, collections, itertools, csv, pathlib, hashlib, base64, statistics, sqlite3, time, functools, random
+   예: "import json\\ndata = {'key': 'value'}\\nprint(json.dumps(data))"
+""")
+
+        return "".join(catalog_parts).strip()
+
+    # ================================================================
+    # v6.0 Phase 2B-5: MCP Client Integration
+    # ================================================================
+
+    async def connect_mcp(
+        self,
+        server_id: str,
+        transport_type: str,
+        stdio_command: list = None,
+        stdio_env: dict = None,
+        http_url: str = None,
+        http_api_key: str = None,
+        timeout: int = 30
+    ) -> dict:
+        """
+        MCP 서버 연결.
+
+        Args:
+            server_id: 서버 식별자
+            transport_type: "stdio" 또는 "http"
+            stdio_command: stdio용 명령 (예: ["npx", "-y", "@modelcontextprotocol/server-filesystem"])
+            stdio_env: stdio용 환경 변수
+            http_url: HTTP용 서버 URL
+            http_api_key: HTTP용 API 키
+            timeout: 요청 타임아웃 (초)
+
+        Returns:
+            {"success": bool, "server_id": str, "tools": list} 또는 {"success": False, "error": str}
+        """
+        from mcp import MCPClient, TransportType
+
+        # 이미 연결된 서버인지 확인
+        if server_id in self.mcp_clients:
+            client = self.mcp_clients[server_id]
+            if client.is_connected():
+                return {
+                    "success": True,
+                    "server_id": server_id,
+                    "tools": client.get_tool_names(),
+                    "message": "Already connected"
+                }
+
+        try:
+            client = MCPClient(
+                transport_type=TransportType(transport_type),
+                stdio_command=stdio_command,
+                stdio_env=stdio_env,
+                http_url=http_url,
+                http_api_key=http_api_key,
+                timeout=timeout
+            )
+
+            if await client.connect():
+                self.mcp_clients[server_id] = client
+                logger.info(f"[MCP] Connected to server '{server_id}' with {len(client.tools)} tools")
+                return {
+                    "success": True,
+                    "server_id": server_id,
+                    "tools": client.get_tool_names(),
+                    "server_info": client.server_info
+                }
+            else:
+                return {"success": False, "error": "Connection failed"}
+
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.error(f"[MCP] Connection error: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def call_mcp(
+        self,
+        server_id: str,
+        tool_name: str,
+        arguments: dict = None
+    ) -> str:
+        """
+        MCP 도구 호출.
+
+        Args:
+            server_id: 서버 식별자
+            tool_name: 도구 이름
+            arguments: 도구 인자
+
+        Returns:
+            도구 실행 결과
+        """
+        if server_id not in self.mcp_clients:
+            return f"ERROR: MCP server '{server_id}' not connected"
+
+        client = self.mcp_clients[server_id]
+        if not client.is_connected():
+            return f"ERROR: MCP server '{server_id}' disconnected"
+
+        result = await client.call_tool(tool_name, arguments or {})
+
+        # 로그
+        self.ssot.log_event(
+            kind="mcp_tool_call",
+            raw_input=f"{server_id}/{tool_name}: {str(arguments)[:200]}",
+            output_preview=result[:200]
+        )
+
+        return result
+
+    async def disconnect_mcp(self, server_id: str) -> dict:
+        """
+        MCP 서버 연결 해제.
+
+        Args:
+            server_id: 서버 식별자
+
+        Returns:
+            {"status": "disconnected"} 또는 {"error": str}
+        """
+        if server_id not in self.mcp_clients:
+            return {"error": f"Server '{server_id}' not found"}
+
+        client = self.mcp_clients[server_id]
+        await client.close()
+        del self.mcp_clients[server_id]
+
+        logger.info(f"[MCP] Disconnected from server '{server_id}'")
+        return {"status": "disconnected", "server_id": server_id}
+
+    def list_mcp_servers(self) -> list:
+        """
+        연결된 MCP 서버 목록.
+
+        Returns:
+            [{"server_id": str, "transport": str, "tools": list, "connected": bool}]
+        """
+        servers = []
+        for sid, client in self.mcp_clients.items():
+            servers.append({
+                "server_id": sid,
+                "transport": client.transport_type.value,
+                "tools": client.get_tool_names(),
+                "connected": client.is_connected(),
+                "server_info": client.server_info
+            })
+        return servers

@@ -63,6 +63,32 @@ DAILY_TOKEN_BUDGET = 500_000
 REPL_TIMEOUT = 10   # seconds
 SHELL_TIMEOUT = 30  # seconds
 
+# === Self-Refine 설정 (Phase 2C-2) ===
+REFINE_ENABLED = True
+REFINE_MAX_ITERATIONS = 3
+REFINE_MIN_SCORE = 70  # 이 점수 이상이면 통과
+REFINE_TYPES = ["blog_article", "saas_report", "strategy_document", "email_outreach"]
+
+# === ADaPT 설정 (Phase 2D-3) ===
+ADAPT_ENABLED = True
+ADAPT_CONFIDENCE_THRESHOLD = 0.7  # 이 이하면 확인 요청/경고
+ADAPT_AUTO_ADJUST = True          # 실행 결과 기반 자동 조정
+ADAPT_MAX_ADJUSTMENTS = 3         # 계획당 최대 조정 횟수
+
+# === Acon 자율 제어 설정 (Phase 2D-4) ===
+ACON_ENABLED = True
+ACON_DAILY_BUDGET = 100           # 일일 자율 행동 예산
+ACON_AUTO_APPROVE_THRESHOLD = 0.2  # 위험도 이하면 자동 승인
+ACON_REQUIRE_CONFIRM_THRESHOLD = 0.7  # 위험도 이상이면 확인 권장
+ACON_MAX_RETRIES = 2              # 실패 시 재시도 횟수
+
+# === LATS 트리 탐색 설정 (Phase 2D-5) ===
+LATS_ENABLED = True
+LATS_BRANCH_FACTOR = 3            # 각 노드에서 생성할 후보 수
+LATS_MAX_DEPTH = 10               # 최대 탐색 깊이
+LATS_EXPLORATION_WEIGHT = 1.4     # UCB1 탐색 가중치
+LATS_MIN_SCORE_THRESHOLD = 0.3    # 이 점수 이하면 가지치기
+
 # === REZE 페르소나 ===
 REZE_OWNER_TITLE = "보스"  # 오너 호칭 (형 → 보스)
 

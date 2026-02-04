@@ -14,6 +14,8 @@ from google import genai
 
 import config
 from ssot import SSOT
+from cache_layer import REZECache
+from context_compressor import ContextCompressor
 from reze_tools import ToolExecutor
 from reze_permissions import PermissionSystem
 from skills_manager import SkillsManager
@@ -321,11 +323,65 @@ class OpenRouterProvider:
 
 
 # ============================================================
-# 6. ModelRouter
+# 6. ProviderHealthTracker (v6.0 Phase 2A)
+# ============================================================
+
+class ProviderHealthTracker:
+    """Provider 장애/rate-limit 추적 및 cooldown 관리."""
+
+    def __init__(self):
+        self.failures = {}  # provider -> (count, last_failure_time)
+        self.cooldowns = {}  # provider -> cooldown_until timestamp
+
+    def record_failure(self, provider: str):
+        """실패 기록. 3회 연속 시 5분 cooldown."""
+        now = time.time()
+        count, _ = self.failures.get(provider, (0, 0))
+        new_count = count + 1
+        self.failures[provider] = (new_count, now)
+
+        # 3회 연속 실패 → 5분 cooldown
+        if new_count >= 3:
+            cooldown_duration = 300  # 5 minutes
+            self.cooldowns[provider] = now + cooldown_duration
+            logger.warning(f"[HealthTracker] {provider} in cooldown for {cooldown_duration}s after {new_count} failures")
+
+    def is_available(self, provider: str) -> bool:
+        """Provider가 사용 가능한지 (cooldown 체크)."""
+        cooldown_until = self.cooldowns.get(provider, 0)
+        if time.time() > cooldown_until:
+            return True
+        remaining = int(cooldown_until - time.time())
+        logger.debug(f"[HealthTracker] {provider} cooldown: {remaining}s remaining")
+        return False
+
+    def record_success(self, provider: str):
+        """성공 시 실패 카운트/cooldown 초기화."""
+        self.failures.pop(provider, None)
+        self.cooldowns.pop(provider, None)
+
+    def get_status(self) -> dict:
+        """현재 health 상태 반환."""
+        now = time.time()
+        status = {}
+        for provider in set(list(self.failures.keys()) + list(self.cooldowns.keys())):
+            count, last = self.failures.get(provider, (0, 0))
+            cooldown = self.cooldowns.get(provider, 0)
+            status[provider] = {
+                "failure_count": count,
+                "last_failure": int(now - last) if last else None,
+                "cooldown_remaining": max(0, int(cooldown - now)) if cooldown > now else 0,
+                "available": self.is_available(provider)
+            }
+        return status
+
+
+# ============================================================
+# 7. ModelRouter
 # ============================================================
 
 class ModelRouter:
-    """역할 기반 LLM 라우팅 + 폴백 체인."""
+    """역할 기반 LLM 라우팅 + 폴백 체인 + Health Tracking (v6.0)."""
 
     # 역할 → provider 매핑 (v4.0 최적화)
     ROLE_ASSIGNMENT = {
@@ -365,6 +421,9 @@ class ModelRouter:
     def __init__(self, ssot: SSOT):
         self.ssot = ssot
         self.providers: dict = {}
+        self.health_tracker = ProviderHealthTracker()  # v6.0 Phase 2A
+        self.cache = REZECache()  # v6.0 Phase 2A: LLM response cache
+        self.compressor = ContextCompressor()  # v6.0 Phase 2A: Context compression
         self._init_providers()
 
     def _init_providers(self):
@@ -411,9 +470,27 @@ class ModelRouter:
 
     async def call(self, step_type: str, messages: list[dict],
                    system: str = "", trace_id: str = None, **kwargs) -> LLMResponse:
-        """역할 기반 호출. 실패 시 폴백. trace_id가 있으면 traces 테이블에 기록."""
+        """역할 기반 호출. 실패 시 폴백 + Health Tracking + Cache (v6.0).
+        trace_id가 있으면 traces 테이블에 기록."""
+        # v6.0: 캐시 체크 (tool_call, extraction 등은 제외)
+        prompt_for_cache = json.dumps(messages, ensure_ascii=False)
+        cached_response = self.cache.get(prompt_for_cache, step_type, system)
+        if cached_response:
+            logger.info(f"Cache HIT for {step_type}")
+            return LLMResponse(
+                text=cached_response,
+                model="cache",
+                provider="llm_cache",
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0
+            )
+
         # 1. 역할에 맞는 provider 선택
         target = self.ROLE_ASSIGNMENT.get(step_type, "cerebras")
+
+        # v6.0: 컨텍스트 압축 (Phase 2 Gap Fix: provider별 차등 압축)
+        messages, system = self.compressor.compress(messages, system, step_type, target_provider=target)
 
         # 2. 시도 순서 결정
         try_order = [target] + self.FALLBACK_CHAIN.get(target, [])
@@ -422,6 +499,11 @@ class ModelRouter:
         last_error = None
         for provider_name in try_order:
             if provider_name not in self.providers:
+                continue
+
+            # v6.0: Health check (cooldown 상태면 skip)
+            if not self.health_tracker.is_available(provider_name):
+                logger.debug(f"{provider_name} in cooldown, skipping")
                 continue
 
             # 일일 한도 체크
@@ -433,9 +515,12 @@ class ModelRouter:
 
             start = time.monotonic()
             try:
-                provider = self.providers[provider_name]
-                response = await provider.call(messages, system=system, **kwargs)
+                # v6.0: Exponential backoff으로 호출
+                response = await self._call_with_backoff(provider_name, messages, system, **kwargs)
                 latency = int((time.monotonic() - start) * 1000)
+
+                # v6.0: 성공 시 health tracker 업데이트
+                self.health_tracker.record_success(provider_name)
 
                 # 사용량 기록
                 self.ssot.add_tokens(response.total_tokens)
@@ -452,29 +537,96 @@ class ModelRouter:
                 if provider_name != target:
                     logger.info(f"Fallback: {target} → {provider_name} for {step_type}")
 
+                # v6.0: 성공한 응답을 캐시에 저장
+                if response.text and len(response.text) >= 10:
+                    self.cache.set(prompt_for_cache, step_type, response.text, system)
+
+                # v6.0 Phase 2C-4: DSPy 성능 기록
+                try:
+                    from manus.dspy_optimizer import DSPyOptimizer
+                    dspy = DSPyOptimizer(self.ssot)
+                    dspy.record_call(
+                        step_type=step_type,
+                        provider=provider_name,
+                        model=response.model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        latency_ms=latency,
+                        success=True
+                    )
+                except Exception as dspy_e:
+                    logger.debug(f"[DSPy] Record failed: {dspy_e}")
+
                 return response
 
             except Exception as e:
                 latency = int((time.monotonic() - start) * 1000)
                 last_error = e
-                logger.warning(f"{provider_name} failed for {step_type}: {e}")
+                error_str = str(e).lower()
+
+                # v6.0: Rate limit 또는 서버 에러 시 health tracker에 기록
+                if '429' in str(e) or 'rate' in error_str or 'quota' in error_str or '503' in str(e) or '500' in str(e):
+                    self.health_tracker.record_failure(provider_name)
+                    logger.warning(f"{provider_name} rate-limited/error for {step_type}: {e}")
+                else:
+                    logger.warning(f"{provider_name} failed for {step_type}: {e}")
 
                 # 에러 trace
                 if trace_id:
                     error_type = 'rate_limit' if '429' in str(e) else (
-                        'timeout' if 'timeout' in str(e).lower() else 'other'
+                        'timeout' if 'timeout' in error_str else 'other'
                     )
                     self.ssot.log_trace(
                         trace_id, 'llm_call', provider_name, '',
                         0, 0, latency, 'error', error_type, str(e)[:500]
                     )
+
+                # v6.0 Phase 2C-4: DSPy 실패 기록
+                try:
+                    from manus.dspy_optimizer import DSPyOptimizer
+                    dspy = DSPyOptimizer(self.ssot)
+                    dspy.record_call(
+                        step_type=step_type,
+                        provider=provider_name,
+                        model="",
+                        input_tokens=0,
+                        output_tokens=0,
+                        latency_ms=latency,
+                        success=False
+                    )
+                except Exception:
+                    pass  # 실패 기록 중 에러는 무시
+
                 continue
 
         raise RuntimeError(f"All providers failed for {step_type}: {last_error}")
 
+    async def _call_with_backoff(self, provider_name: str, messages: list[dict],
+                                  system: str = "", max_retries: int = 3, **kwargs) -> LLMResponse:
+        """v6.0: Exponential backoff으로 provider 호출."""
+        delays = [1, 2, 4]  # seconds
+        provider = self.providers[provider_name]
+
+        for attempt in range(max_retries):
+            try:
+                return await provider.call(messages, system=system, **kwargs)
+            except Exception as e:
+                error_str = str(e).lower()
+                is_retryable = '429' in str(e) or 'rate' in error_str or 'quota' in error_str or '503' in str(e)
+
+                if attempt < max_retries - 1 and is_retryable:
+                    delay = delays[attempt] if attempt < len(delays) else delays[-1]
+                    logger.info(f"{provider_name} retry {attempt + 1}/{max_retries} after {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        # Should not reach here, but just in case
+        raise RuntimeError(f"{provider_name} call failed after {max_retries} retries")
+
 
 # ============================================================
-# 7. OutputValidator
+# 8. OutputValidator
 # ============================================================
 
 class OutputValidator:
@@ -579,7 +731,7 @@ class OutputValidator:
 
 
 # ============================================================
-# 8. CircuitBreaker
+# 9. CircuitBreaker
 # ============================================================
 
 class CircuitBreaker:
@@ -618,7 +770,7 @@ class CircuitBreaker:
 
 
 # ============================================================
-# 9. REZECore — 메인 ReAct 엔진
+# 10. REZECore — 메인 ReAct 엔진
 # ============================================================
 
 class REZECore:
@@ -645,6 +797,10 @@ class REZECore:
         self.circuit_breaker = circuit_breaker
         self.output_validator = OutputValidator()
         self.capability_engine = capability_engine  # v4.0 ULTIMATE
+
+        # v6.0 Phase 2D-1: CoALA 메모리
+        from manus.coala import CoALAMemory
+        self.coala = CoALAMemory(ssot)
 
     async def run(self, task: str, source: str = "api") -> dict:
         """메인 ReAct 루프 (v4.0: 학습 루프 통합)."""
@@ -677,17 +833,22 @@ class REZECore:
         if relevant_skills:
             logger.info(f"Skills matched: {relevant_skills}")
 
-        # 2. 시스템 프롬프트 (v4.0: 경험 컨텍스트 포함)
-        system_prompt = self._build_system_prompt(skill_context + experience_context)
-
-        # 3. SSOT 태스크 기록
+        # 2. SSOT 태스크 기록
         task_id = self.ssot.create_task(task)
 
-        # 4. ReAct 루프
+        # 3. v6.0 Phase 2D-1: CoALA Working Memory 초기화
+        self.coala.init_working(task_id, task)
+        coala_context = self.coala.get_working_context()
+
+        # 4. 시스템 프롬프트 (v4.0: 경험 컨텍스트 + CoALA 포함)
+        system_prompt = self._build_system_prompt(skill_context + experience_context + coala_context)
+
+        # 5. ReAct 루프
         messages = [{"role": "user", "content": task}]
         recent_actions: deque = deque(maxlen=5)
         consecutive_failures = 0
         total_tokens_used = 0
+        tool_history = []  # v6.0 Phase 2C-3: Voyager용 도구 실행 이력
 
         for step in range(config.MAX_ITERATIONS):
             # --- Circuit Breaker 체크 ---
@@ -732,6 +893,33 @@ class REZECore:
                 self.ssot.complete_task(task_id, "success", answer)
                 logger.info(f"Task completed: {task_id} in {step + 1} steps, {total_tokens_used} tokens")
 
+                # ── v6.0 Phase 2C-2: Self-Refine 적용 ──
+                quality_score = None
+                refine_iterations = 0
+                if config.REFINE_ENABLED:
+                    try:
+                        from manus.self_refine import SelfRefineEngine
+                        refiner = SelfRefineEngine(
+                            router=self.router,
+                            max_iterations=config.REFINE_MAX_ITERATIONS,
+                            min_score=config.REFINE_MIN_SCORE,
+                            enabled_types=config.REFINE_TYPES
+                        )
+                        refine_result = await refiner.refine(
+                            content=answer,
+                            task=task,
+                            classify_fn=self._classify_output,
+                            hard_check_fn=self._run_hard_checks,
+                            cross_review_fn=self._cross_review
+                        )
+                        answer = refine_result.final_content
+                        quality_score = refine_result.final_score
+                        refine_iterations = refine_result.iterations
+                        if refine_result.improved:
+                            logger.info(f"[REZE] Self-Refine: {refine_result.initial_score:.1f} -> {refine_result.final_score:.1f} ({refine_iterations} iterations)")
+                    except Exception as e:
+                        logger.warning(f"[REZE] Self-Refine failed: {e}")
+
                 # ── v4.0: 성공 시 plan_cache 저장 ──
                 if step >= 1:  # 최소 2스텝 이상 걸린 태스크만
                     try:
@@ -742,18 +930,51 @@ class REZECore:
                             procedure=procedure,
                             steps=step + 1,
                             tokens=total_tokens_used,
-                            score=None  # feedback_engine이 실측 후 업데이트
+                            score=quality_score  # Self-Refine 점수 사용
                         )
                     except Exception as e:
                         logger.warning(f"Plan cache save failed: {e}")
 
                 # ── v4.0: 반성 + 교훈 추출 ──
                 result = self._result(True, answer, task_id, step + 1, total_tokens_used,
-                                      skills_used=relevant_skills, quality_score=None)
+                                      skills_used=relevant_skills, quality_score=quality_score,
+                                      refine_iterations=refine_iterations)
                 try:
                     await self._reflect_and_learn(task, result)
                 except Exception as e:
                     logger.warning(f"Reflect and learn failed: {e}")
+
+                # ── v6.0 Phase 2C-3: Voyager 스킬 추출 ──
+                if len(tool_history) >= 2:  # 최소 2개 도구 사용 시
+                    try:
+                        from manus.voyager import VoyagerEngine
+                        voyager = VoyagerEngine(self.ssot, self.router)
+                        await voyager.extract_skill(
+                            task_id=task_id,
+                            task=task,
+                            tool_history=tool_history,
+                            final_answer=answer,
+                            success=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"[REZE] Voyager skill extraction failed: {e}")
+
+                # ── v6.0 Phase 2D-1: CoALA 에피소드 저장 ──
+                if self.coala.working:
+                    try:
+                        self.coala.store_episode(
+                            task_id=task_id,
+                            task_summary=task[:200],
+                            tools_used=[t["tool"] for t in tool_history],
+                            outcome="success",
+                            outcome_summary=answer[:200],
+                            context_snapshot=self.coala.working.get_context_snapshot(),
+                            tokens_used=total_tokens_used
+                        )
+                    except Exception as e:
+                        logger.warning(f"[REZE] CoALA episode store failed: {e}")
+                    finally:
+                        self.coala.clear_working()
 
                 return result
 
@@ -783,6 +1004,18 @@ class REZECore:
             # --- SSOT 업데이트 ---
             is_success = not observation.startswith("ERROR") and not observation.startswith("BLOCKED")
             self.ssot.update_iteration(iter_id, observation, is_success)
+
+            # ── v6.0 Phase 2C-3: Voyager용 도구 이력 ──
+            tool_history.append({
+                "tool": tool_name,
+                "input": str(tool_input)[:300],
+                "output": observation[:300],
+                "success": is_success
+            })
+
+            # ── v6.0 Phase 2D-1: CoALA Working Memory 업데이트 ──
+            if self.coala.working:
+                self.coala.working.add_tool_result(tool_name, tool_input, observation, is_success)
 
             # 도구 실행 trace
             self.ssot.log_trace(
@@ -829,6 +1062,24 @@ class REZECore:
 
         # --- 루프 종료 (미완료) ---
         self.ssot.complete_task(task_id, "incomplete", "Max iterations reached")
+
+        # ── v6.0 Phase 2D-1: CoALA 실패 에피소드 저장 ──
+        if self.coala.working:
+            try:
+                self.coala.store_episode(
+                    task_id=task_id,
+                    task_summary=task[:200],
+                    tools_used=[t["tool"] for t in tool_history],
+                    outcome="failure",
+                    outcome_summary="Max iterations reached",
+                    context_snapshot=self.coala.working.get_context_snapshot(),
+                    tokens_used=total_tokens_used
+                )
+            except Exception:
+                pass
+            finally:
+                self.coala.clear_working()
+
         return self._result(False, "Max iterations reached", task_id, config.MAX_ITERATIONS, total_tokens_used)
 
     def _build_system_prompt(self, skill_context: str = "") -> str:
@@ -877,7 +1128,7 @@ class REZECore:
 
     def _result(self, success: bool, answer: str, task_id: str,
                 steps: int, tokens: int, skills_used: list = None,
-                quality_score: float = None) -> dict:
+                quality_score: float = None, refine_iterations: int = 0) -> dict:
         """결과 딕셔너리."""
         return {
             "success": success,
@@ -887,6 +1138,7 @@ class REZECore:
             "total_tokens": tokens,
             "skills_used": skills_used or [],
             "quality_score": quality_score,
+            "refine_iterations": refine_iterations,
         }
 
     # ============================================================

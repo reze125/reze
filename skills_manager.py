@@ -1,7 +1,8 @@
 """
-REZE v4.0 Skills Manager
+REZE v6.0 Skills Manager
 - 8개 메타스킬 + YAML configs 로딩
-- 동적 스킬 (skills/dynamic/) 로딩
+- 동적 스킬 (skills/dynamic/SKILL.md) 로딩
+- v6.0 신규: YAML 동적 스킬 (skills/dynamic/*.yaml) + SkillClassifier
 - 기존 _legacy/ 스킬은 무시
 """
 
@@ -9,9 +10,11 @@ import os
 import re
 import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 import config
+from skill_loader import SkillLoader, DynamicSkill
+from skill_classifier import SkillClassifier
 
 import logging
 logger = logging.getLogger("REZE.skills")
@@ -26,9 +29,16 @@ class SkillsManager:
     def __init__(self, skills_dir: Optional[Path] = None):
         self.skills_dir = skills_dir or config.SKILLS_DIR
         self.catalog: dict[str, dict] = {}         # 메타스킬
-        self.dynamic_catalog: dict[str, dict] = {} # 동적 생성 스킬
+        self.dynamic_catalog: dict[str, dict] = {} # 동적 생성 스킬 (SKILL.md 기반)
+
+        # v6.0 신규: YAML 동적 스킬 시스템
+        self.loader = SkillLoader(self.skills_dir / "dynamic")
+        self.classifier = SkillClassifier()
+        self.yaml_skills: dict[str, DynamicSkill] = {}
+
         self._load_meta_skills()
         self._load_dynamic_skills()
+        self._load_yaml_skills()  # v6.0 신규
 
     def _load_meta_skills(self):
         """8개 메타스킬 + configs 로드"""
@@ -86,6 +96,12 @@ class SkillsManager:
         if self.dynamic_catalog:
             logger.info(f"Loaded {len(self.dynamic_catalog)} dynamic skills: {list(self.dynamic_catalog.keys())}")
 
+    def _load_yaml_skills(self):
+        """v6.0: YAML 동적 스킬 로드 (skills/dynamic/*.yaml)"""
+        self.yaml_skills = self.loader.load_all()
+        if self.yaml_skills:
+            logger.info(f"Loaded {len(self.yaml_skills)} YAML skills: {list(self.yaml_skills.keys())}")
+
     def _parse_skill(self, skill_md_path: Path) -> Optional[dict]:
         """SKILL.md 파일에서 YAML frontmatter + content 파싱"""
         text = skill_md_path.read_text(encoding='utf-8')
@@ -127,9 +143,12 @@ class SkillsManager:
         """스킬 카탈로그 새로고침"""
         self.catalog = {}
         self.dynamic_catalog = {}
+        self.yaml_skills = {}
+        self.classifier.clear_cache()  # v6.0: 패턴 캐시 초기화
         self._load_meta_skills()
         self._load_dynamic_skills()
-        return len(self.catalog) + len(self.dynamic_catalog)
+        self._load_yaml_skills()  # v6.0 신규
+        return len(self.catalog) + len(self.dynamic_catalog) + len(self.yaml_skills)
 
     def find_relevant(self, task: str) -> list[str]:
         """태스크에 관련된 메타스킬 + 동적 스킬 찾기"""
@@ -219,7 +238,7 @@ class SkillsManager:
 
     def get_catalog_summary(self) -> str:
         """LLM 시스템 프롬프트에 넣을 스킬 목록 요약."""
-        if not self.catalog and not self.dynamic_catalog:
+        if not self.catalog and not self.dynamic_catalog and not self.yaml_skills:
             return "(no skills loaded)"
 
         lines = []
@@ -227,4 +246,102 @@ class SkillsManager:
             lines.append(f"- {name}: {info.get('description', '')}")
         for name, info in self.dynamic_catalog.items():
             lines.append(f"- dynamic/{name}: {info.get('description', '')}")
+        # v6.0: YAML 스킬 추가
+        for name, skill in self.yaml_skills.items():
+            lines.append(f"- yaml/{name}: {skill.description}")
         return "\n".join(lines)
+
+    # === v6.0: 스킬 분류 시스템 ===
+
+    async def classify_task(
+        self,
+        task: str,
+        llm_fn: Optional[Callable[[str], Awaitable[str]]] = None
+    ) -> Optional[str]:
+        """
+        태스크를 적절한 스킬에 매핑.
+
+        우선순위:
+        1. 기존 메타스킬/동적스킬 (트리거 매칭)
+        2. YAML 스킬 (패턴 매칭 → LLM 분류)
+
+        Args:
+            task: 분류할 태스크
+            llm_fn: LLM 호출 함수 (선택적, 정밀 분류용)
+
+        Returns:
+            스킬 이름 (예: "blog-engine", "yaml/research-agent") 또는 None
+        """
+        # 1. 기존 트리거 매칭 시도
+        matched = self.find_relevant(task)
+        if matched:
+            return matched[0]
+
+        # 2. YAML 스킬 분류 시도
+        yaml_match = await self.classifier.classify(
+            task, self.yaml_skills, llm_fn
+        )
+        if yaml_match:
+            return f"yaml/{yaml_match}"
+
+        return None
+
+    def get_yaml_skill(self, name: str) -> Optional[DynamicSkill]:
+        """YAML 스킬 조회."""
+        # yaml/ 프리픽스 제거
+        if name.startswith("yaml/"):
+            name = name[5:]
+        return self.yaml_skills.get(name)
+
+    def get_skill_info(self, skill_name: str) -> Optional[dict]:
+        """
+        스킬 정보 통합 조회.
+
+        Returns:
+            {
+                'type': 'meta' | 'dynamic' | 'yaml',
+                'name': str,
+                'description': str,
+                'allowed_tools': list (yaml 스킬만),
+                'system_prompt': str (yaml 스킬만),
+                'content': str (메타/동적 스킬만),
+            }
+        """
+        # YAML 스킬
+        if skill_name.startswith("yaml/"):
+            skill = self.get_yaml_skill(skill_name)
+            if skill:
+                return {
+                    'type': 'yaml',
+                    'name': skill.name,
+                    'description': skill.description,
+                    'allowed_tools': skill.allowed_tools,
+                    'system_prompt': skill.system_prompt,
+                    'examples': skill.examples,
+                }
+            return None
+
+        # 동적 스킬 (SKILL.md)
+        if skill_name.startswith("dynamic/"):
+            dyn_name = skill_name.replace("dynamic/", "")
+            skill = self.dynamic_catalog.get(dyn_name)
+            if skill:
+                return {
+                    'type': 'dynamic',
+                    'name': skill_name,
+                    'description': skill.get('description', ''),
+                    'content': skill.get('content', ''),
+                }
+            return None
+
+        # 메타스킬
+        skill = self.catalog.get(skill_name)
+        if skill:
+            return {
+                'type': 'meta',
+                'name': skill_name,
+                'description': skill.get('description', ''),
+                'content': skill.get('content', ''),
+            }
+
+        return None

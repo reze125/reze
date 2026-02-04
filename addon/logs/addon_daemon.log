@@ -48,3 +48,14 @@
 2026-02-04 03:00:04,144 [INFO] [DONE] memory_tier (16ms) -> {'synced': 0, 'compressed': 0, 'decayed': 1}
 2026-02-04 06:19:42,199 [INFO] REZE ADDON DAEMON started
 2026-02-04 06:19:42,200 [INFO] Schedules registered
+2026-02-04 12:19:42,290 [INFO] [START] curiosity_engine.explore
+2026-02-04 12:19:43,202 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 12:19:44,183 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 12:19:44,895 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 12:19:44,915 [INFO] [DONE] curiosity_engine (2620ms) -> {'generated': 3, 'answered': 3, 'promoted': 3, 'high_value': ['quotepilot 이탈 패턴?', '크로스셀링 기회?', 'nocode-tools-lab 인기 글 공통점?']}
+2026-02-04 14:03:10,625 [INFO] REZE ADDON DAEMON started
+2026-02-04 14:03:10,631 [INFO] Schedules registered
+2026-02-04 20:03:32,060 [INFO] [START] curiosity_engine.explore
+2026-02-04 20:03:32,793 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 20:03:33,502 [INFO] HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 200 OK"
+2026-02-04 20:03:33,529 [INFO] [DONE] curiosity_engine (1463ms) -> {'generated': 2, 'answered': 2, 'promoted': 2, 'high_value': ['agenthub 가장 많이 쓰는 기능?', '새 수익 모델?']}

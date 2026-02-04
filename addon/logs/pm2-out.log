@@ -2,3 +2,6 @@
 2026-02-03 19:35:01:    테이블 13개: ['core_memory', 'archival_memory', 'sqlite_sequence', 'memory_ops_log', 'dspy_programs', 'dspy_training_data', 'modification_archive', 'modification_sandbox', 'discovered_services', 'tool_registry', 'curiosity_questions', 'exploration_log', 'addon_runs']
 2026-02-04 06:19:42: Addon DB 초기화 완료: /home/reze/reze-agent/addon/data/addon.db
 2026-02-04 06:19:42: 
+2026-02-04 14:03:10: Addon DB 초기화 완료: /home/reze/reze-agent/addon/data/addon.db
+2026-02-04 14:03:10: 
+2026-02-04 14:03:10:    테이블 13개: ['core_memory', 'archival_memory', 'sqlite_sequence', 'memory_ops_log', 'dspy_programs', 'dspy_training_data', 'modification_archive', 'modification_sandbox', 'discovered_services', 'tool_registry', 'curiosity_questions', 'exploration_log', 'addon_runs']

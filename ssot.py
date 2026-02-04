@@ -603,6 +603,256 @@ class SSOT:
             last_used_at TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- v6.0 Phase 2B-4: Manus 3종
+
+        -- 실패 로그 영구 보존
+        CREATE TABLE IF NOT EXISTS failures_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            failure_id TEXT UNIQUE,
+            task_id TEXT,
+            failure_type TEXT,
+            step_number INTEGER,
+            tool_name TEXT,
+            error_message TEXT,
+            stack_trace TEXT,
+            context_json TEXT,
+            recovered INTEGER DEFAULT 0,
+            recovery_method TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_failures_task ON failures_v6(task_id);
+        CREATE INDEX IF NOT EXISTS idx_failures_type ON failures_v6(failure_type, created_at);
+
+        -- 태스크 체크포인트 (복구용)
+        CREATE TABLE IF NOT EXISTS checkpoints_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT,
+            step_number INTEGER,
+            state_json TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(task_id, step_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints_v6(task_id);
+
+        -- v6.0 Phase 2C-1: Reflexion - 실패 교훈 저장
+        CREATE TABLE IF NOT EXISTS failure_lessons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lesson_id TEXT UNIQUE NOT NULL,
+            failure_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+
+            -- 실패 컨텍스트
+            failure_type TEXT NOT NULL,
+            tool_name TEXT,
+            error_pattern TEXT NOT NULL,
+
+            -- 교훈 내용
+            lesson_text TEXT NOT NULL,
+            corrective_action TEXT,
+            avoid_pattern TEXT,
+
+            -- 메타데이터
+            confidence REAL DEFAULT 0.5,
+            apply_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+
+            -- 매칭 조건
+            tags TEXT,
+            applicable_tools TEXT,
+
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_failure_lessons_type ON failure_lessons(failure_type);
+        CREATE INDEX IF NOT EXISTS idx_failure_lessons_tool ON failure_lessons(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_failure_lessons_pattern ON failure_lessons(error_pattern);
+
+        -- v6.0 Phase 2C-3: Voyager Skill Library
+        CREATE TABLE IF NOT EXISTS voyager_skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            task_pattern TEXT NOT NULL,
+            intent_patterns TEXT NOT NULL,
+            allowed_tools TEXT NOT NULL,
+            tool_sequence TEXT NOT NULL,
+            system_prompt TEXT,
+            examples TEXT,
+            source_task_id TEXT,
+            use_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            confidence REAL DEFAULT 0.5,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_voyager_task_pattern ON voyager_skills(task_pattern);
+        CREATE INDEX IF NOT EXISTS idx_voyager_status ON voyager_skills(status);
+
+        -- v6.0 Phase 2C-4: DSPy 프롬프트 성능 추적
+        CREATE TABLE IF NOT EXISTS prompt_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_type TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT,
+            prompt_hash TEXT,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            latency_ms INTEGER DEFAULT 0,
+            success INTEGER DEFAULT 1,
+            quality_score REAL,
+            task_id TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_prompt_metrics_step ON prompt_metrics(step_type, created_at);
+        CREATE INDEX IF NOT EXISTS idx_prompt_metrics_provider ON prompt_metrics(provider, created_at);
+
+        -- DSPy 최적화 이력
+        CREATE TABLE IF NOT EXISTS dspy_optimizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            optimization_type TEXT NOT NULL,
+            target TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT NOT NULL,
+            metrics_before TEXT,
+            metrics_after TEXT,
+            status TEXT DEFAULT 'proposed',
+            created_at TEXT DEFAULT (datetime('now')),
+            applied_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_dspy_opt_status ON dspy_optimizations(status);
+
+        -- v6.0 Phase 2D-1: CoALA Episodic Memory (경험 기록)
+        CREATE TABLE IF NOT EXISTS episodic_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            episode_id TEXT UNIQUE NOT NULL,
+            task_id TEXT NOT NULL,
+            task_summary TEXT NOT NULL,
+            tools_used TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            outcome_summary TEXT,
+            context_snapshot TEXT,
+            duration_ms INTEGER,
+            tokens_used INTEGER,
+            lessons_extracted INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_episodic_task ON episodic_memory(task_id);
+        CREATE INDEX IF NOT EXISTS idx_episodic_outcome ON episodic_memory(outcome, created_at);
+
+        -- v6.0 Phase 2D-1: CoALA Semantic Memory (일반 지식)
+        CREATE TABLE IF NOT EXISTS semantic_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            knowledge_id TEXT UNIQUE NOT NULL,
+            category TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            knowledge TEXT NOT NULL,
+            confidence REAL DEFAULT 0.5,
+            source_episodes TEXT,
+            use_count INTEGER DEFAULT 0,
+            last_used_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_semantic_category ON semantic_memory(category);
+        CREATE INDEX IF NOT EXISTS idx_semantic_subject ON semantic_memory(subject);
+
+        -- v6.0 Phase 2D-2: VIGIL 감사 로그
+        CREATE TABLE IF NOT EXISTS vigil_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,       -- file_access, code_execution, kill_switch
+            target TEXT,                    -- 대상 파일/명령
+            action TEXT NOT NULL,           -- blocked, allowed, warning
+            reason TEXT,
+            source TEXT,                    -- 요청 출처 (api, schedule 등)
+            context TEXT,                   -- JSON: 추가 컨텍스트
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_vigil_event ON vigil_audit(event_type, created_at);
+        CREATE INDEX IF NOT EXISTS idx_vigil_action ON vigil_audit(action, created_at);
+
+        -- v6.0 Phase 2D-3: ADaPT 계획 조정 이력
+        CREATE TABLE IF NOT EXISTS adapt_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            step_id INTEGER NOT NULL,
+            adjustment_type TEXT NOT NULL,  -- modify, skip, insert, branch
+            original_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            triggered_by TEXT,              -- execution_result, confidence, condition
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_adapt_plan ON adapt_adjustments(plan_id);
+
+        -- v6.0 Phase 2D-4: Acon 결정 이력
+        CREATE TABLE IF NOT EXISTS acon_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_type TEXT NOT NULL,      -- shell, code_edit, http, ...
+            action_input TEXT,
+            risk_level TEXT NOT NULL,       -- auto, low, medium, high, lock
+            risk_score REAL,
+            decision TEXT NOT NULL,         -- approved, denied, escalated, deferred
+            reason TEXT,
+            cost INTEGER DEFAULT 1,         -- 예산 차감량
+            source TEXT,                    -- api, schedule, autonomous
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_acon_decision ON acon_decisions(decision, created_at);
+        CREATE INDEX IF NOT EXISTS idx_acon_risk ON acon_decisions(risk_level, created_at);
+
+        -- v6.0 Phase 2D-4: Acon 일일 예산
+        CREATE TABLE IF NOT EXISTS acon_budget (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL UNIQUE,
+            total_budget INTEGER DEFAULT 100,
+            used INTEGER DEFAULT 0,
+            auto_count INTEGER DEFAULT 0,
+            low_count INTEGER DEFAULT 0,
+            medium_count INTEGER DEFAULT 0,
+            denied_count INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_acon_budget_date ON acon_budget(date);
+
+        -- v6.0 Phase 2D-5: LATS 탐색 세션
+        CREATE TABLE IF NOT EXISTS lats_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            task TEXT,
+            status TEXT DEFAULT 'active',    -- active, completed, failed
+            total_nodes INTEGER DEFAULT 0,
+            explored_nodes INTEGER DEFAULT 0,
+            best_path TEXT,                   -- JSON: 최적 경로
+            best_score REAL,
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_lats_session_task ON lats_sessions(task_id);
+        CREATE INDEX IF NOT EXISTS idx_lats_session_status ON lats_sessions(status);
+
+        -- v6.0 Phase 2D-5: LATS 탐색 노드
+        CREATE TABLE IF NOT EXISTS lats_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            parent_id INTEGER,                -- NULL이면 루트
+            depth INTEGER DEFAULT 0,
+            action TEXT,                      -- thought
+            tool TEXT,
+            tool_input TEXT,
+            observation TEXT,
+            score REAL,                       -- 평가 점수
+            visits INTEGER DEFAULT 0,         -- MCTS 방문 횟수
+            value REAL DEFAULT 0,             -- 누적 가치
+            status TEXT DEFAULT 'pending',    -- pending, expanded, terminal, pruned
+            is_success INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (session_id) REFERENCES lats_sessions(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lats_node_session ON lats_nodes(session_id, depth);
+        CREATE INDEX IF NOT EXISTS idx_lats_node_parent ON lats_nodes(parent_id);
         """)
         self.conn.commit()
 

@@ -19,6 +19,11 @@ class PlanStep:
     on_fail: str = ""
     result: str = ""
     status: str = "pending"
+    # v6.0 Phase 2D-3: ADaPT 확장
+    confidence: float = 0.8           # 단계 신뢰도 (0.0~1.0)
+    condition: str = ""               # 실행 조건 (이전 결과 기반)
+    branch_if_true: int = None        # 조건 참일 때 다음 단계 ID
+    branch_if_false: int = None       # 조건 거짓일 때 다음 단계 ID
 
 
 @dataclass
@@ -162,6 +167,22 @@ class TaskExecutor:
         self.feedback = feedback  # v5.0 Phase 3
         self.plan_memory = plan_memory  # v5.0 Phase 4
 
+        # v6.0 Phase 2D-3: ADaPT 엔진
+        self.adapt = None
+        try:
+            import config
+            if getattr(config, 'ADAPT_ENABLED', False):
+                from manus.adapt import ADaPTEngine
+                self.adapt = ADaPTEngine(
+                    ssot=ssot,
+                    router=None,  # 나중에 설정
+                    confidence_threshold=getattr(config, 'ADAPT_CONFIDENCE_THRESHOLD', 0.7),
+                    auto_adjust=getattr(config, 'ADAPT_AUTO_ADJUST', True),
+                    max_adjustments=getattr(config, 'ADAPT_MAX_ADJUSTMENTS', 3)
+                )
+        except Exception as e:
+            logger.debug(f"[TaskExecutor] ADaPT init skipped: {e}")
+
     async def execute(self, plan, task_id=None, source="planner"):
         """계획 실행."""
         plan_id = self.ssot.save_execution_plan(
@@ -170,10 +191,34 @@ class TaskExecutor:
 
         results = []
         step_results = {}
+        consecutive_failures = 0
 
-        for step in plan.steps:
+        # v6.0 Phase 2D-3: ADaPT 초기화
+        if self.adapt:
+            self.adapt.reset()
+
+        i = 0
+        while i < len(plan.steps):
+            step = plan.steps[i]
             step.status = "running"
             t0 = time.time()
+
+            # v6.0 Phase 2D-3: ADaPT 신뢰도 평가
+            if self.adapt:
+                try:
+                    from manus.adapt import AdaptivePlanStep
+                    adaptive_step = self.adapt.convert_to_adaptive_step(step)
+                    context = {
+                        **step_results,
+                        "consecutive_failures": consecutive_failures,
+                        "last_result": step_results.get(f"step_{step.id - 1}_result", "")
+                    }
+                    confidence = await self.adapt.evaluate_confidence(adaptive_step, context)
+                    if confidence.should_confirm:
+                        logger.info(f"[ADaPT] Step {step.id} low confidence ({confidence.score:.2f}): {confidence.suggestion}")
+                        # 신뢰도가 낮으면 경고 로그 (향후 확인 요청 기능 추가 가능)
+                except Exception as e:
+                    logger.debug(f"[ADaPT] Confidence eval error: {e}")
 
             try:
                 tool_input = self._resolve(step.input, step_results)
@@ -189,6 +234,7 @@ class TaskExecutor:
                 step.result = output[:2000]
                 step.status = "failed" if is_err else "success"
                 step_results[f"step_{step.id}_result"] = output[:1000]
+                step_results[f"step_{step.id}_expect"] = step.expect
 
                 self.ssot.log_tool_execution(
                     task_id, step.tool,
@@ -204,12 +250,50 @@ class TaskExecutor:
                     "duration_ms": dur
                 })
 
+                # 연속 실패 추적
+                if is_err:
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+
                 if is_err:
                     new_plan = await self.planner.replan(plan, step, output, results)
                     if new_plan:
                         self.ssot.update_plan_progress(plan_id, len(results), "replanning")
                         return await self.execute(new_plan, task_id, source)
                     break
+
+                # v6.0 Phase 2D-3: 조건 분기 평가
+                next_step_idx = i + 1
+                if self.adapt and step.condition:
+                    try:
+                        adaptive_step = self.adapt.convert_to_adaptive_step(step)
+                        context = {**step_results, "last_result": output}
+                        _, next_step_id = self.adapt.evaluate_condition(adaptive_step, context)
+                        # 다음 단계 ID로 인덱스 찾기
+                        for idx, s in enumerate(plan.steps):
+                            if s.id == next_step_id:
+                                next_step_idx = idx
+                                break
+                    except Exception as e:
+                        logger.debug(f"[ADaPT] Condition eval error: {e}")
+
+                # v6.0 Phase 2D-3: 다음 단계 동적 조정
+                if self.adapt and next_step_idx < len(plan.steps):
+                    try:
+                        next_step = plan.steps[next_step_idx]
+                        adaptive_next = self.adapt.convert_to_adaptive_step(next_step)
+                        context = {**step_results, "last_result": output}
+                        adjusted, was_adjusted = await self.adapt.adjust_step(
+                            adaptive_next, output, context, plan_id
+                        )
+                        if was_adjusted:
+                            # 조정 결과 적용
+                            plan.steps[next_step_idx].input = adjusted.input
+                    except Exception as e:
+                        logger.debug(f"[ADaPT] Step adjustment error: {e}")
+
+                i = next_step_idx
 
             except Exception as e:
                 step.status = "failed"

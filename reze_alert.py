@@ -12,11 +12,12 @@ logger = logging.getLogger("REZE.alert")
 
 
 class AlertManager:
-    """severity 기반 알림. critical → Moltbook 포스트."""
+    """severity 기반 알림. Discord 전송 + 선택적 Moltbook 포스트."""
 
-    def __init__(self, ssot, moltbook_key: str = None):
+    def __init__(self, ssot, moltbook_key: str = None, enable_moltbook: bool = False):
         self.ssot = ssot
         self._moltbook_key = moltbook_key or self._load_moltbook_key()
+        self._enable_moltbook = enable_moltbook  # v6.0: 기본 비활성화
 
     def _load_moltbook_key(self) -> str:
         """~/moltbook_credentials.json에서 API key 로드."""
@@ -30,15 +31,34 @@ class AlertManager:
         return ""
 
     async def send(self, severity: str, source: str, message: str) -> None:
-        """알림 기록. critical이면 Moltbook 전송."""
+        """알림 기록 → Discord 전송 (critical/warning). Moltbook은 비활성화."""
         self.ssot.save_signal(
             f"alert_{severity}",
             f"[{source}] {message}"
         )
         logger.info(f"Alert [{severity}] {source}: {message[:100]}")
 
-        if severity == "critical" and self._moltbook_key:
+        # v6.0: Discord 전송 (critical, warning)
+        if severity in ("critical", "warning"):
+            emoji = "🚨" if severity == "critical" else "⚠️"
+            await self._post_discord(f"{emoji} **[{source}]** {message[:1800]}")
+
+        # Moltbook은 명시적으로 활성화한 경우만
+        if severity == "critical" and self._moltbook_key and self._enable_moltbook:
             await self._post_moltbook(f"🚨 [{source}] {message[:400]}")
+
+    async def _post_discord(self, content: str) -> None:
+        """Discord ALERT 웹훅으로 전송."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    config.DISCORD_WEBHOOK_ALERT,
+                    json={"content": content},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                logger.info("Discord alert sent")
+        except Exception as e:
+            logger.warning(f"Discord alert failed: {e}")
 
     async def _post_moltbook(self, content: str) -> None:
         """Moltbook에 알림 포스트."""

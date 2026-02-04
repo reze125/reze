@@ -300,8 +300,18 @@ class SecurePythonREPL:
 
         return None
 
-    def execute(self, code: str) -> str:
+    def execute(self, code: str, source: str = "unknown") -> str:
         """Python 코드 실행. AST 검증 → 타임아웃 스레드 실행."""
+        # v6.0 Phase 2D-2: VIGIL 코드 검사
+        try:
+            from manus.vigil import get_vigil
+            vigil = get_vigil()
+            vigil_result = vigil.check_code(code, "python", source)
+            if not vigil_result.allowed:
+                return f"BLOCKED by VIGIL: {vigil_result.reason}"
+        except ImportError:
+            pass  # VIGIL 모듈 없으면 스킵
+
         error = self._validate_ast(code)
         if error:
             return f"ERROR: {error}"
@@ -362,8 +372,18 @@ class FilesystemTool:
         except Exception as e:
             return f"ERROR: {e}"
 
-    def write(self, path: str, content: str) -> str:
-        """파일 쓰기. WRITE_ALLOWED_PATHS 내에서만."""
+    def write(self, path: str, content: str, source: str = "unknown") -> str:
+        """파일 쓰기. WRITE_ALLOWED_PATHS 내에서만 + VIGIL 검사."""
+        # v6.0 Phase 2D-2: VIGIL 파일 및 콘텐츠 검사
+        try:
+            from manus.vigil import get_vigil
+            vigil = get_vigil()
+            vigil_result = vigil.check_file_content(path, content, source)
+            if not vigil_result.allowed:
+                return f"BLOCKED by VIGIL: {vigil_result.reason}"
+        except ImportError:
+            pass  # VIGIL 모듈 없으면 스킵
+
         try:
             target = Path(path).expanduser().resolve()
 
@@ -451,20 +471,21 @@ def is_free(action_type: str) -> bool:
 
 # === 자기 수정 화이트리스트 ===
 # REZE가 수정할 수 있는 파일 (이 목록 자체는 수정 불가)
+# v6.0 Phase 2D-2: 핵심 파일(config.py, ssot.py, reze_core.py)은 VIGIL이 보호
 
 SELF_MODIFIABLE_FILES = [
     "skills/*/SKILL.md",
-    "config.py",
+    # "config.py",          # VIGIL 보호 대상
     "prompts/*.py",
     "utils/*.py",
     "docs/*",
     "reze_daemon.py",
     "reze_tools.py",
-    "ssot.py",
+    # "ssot.py",            # VIGIL 보호 대상
     "skills_manager.py",
     "reze_alert.py",
     "reze_biz.py",
-    "reze_core.py",
+    # "reze_core.py",       # VIGIL 보호 대상
     "reze_self_healing.py",
     "moltbook_bot.py",
     "self_evolution.py",
