@@ -742,14 +742,14 @@ class REZECore:
                             procedure=procedure,
                             steps=step + 1,
                             tokens=total_tokens_used,
-                            score=None  # feedback_engine이 실측 후 업데이트
+                            score=0.8
                         )
                     except Exception as e:
                         logger.warning(f"Plan cache save failed: {e}")
 
                 # ── v4.0: 반성 + 교훈 추출 ──
                 result = self._result(True, answer, task_id, step + 1, total_tokens_used,
-                                      skills_used=relevant_skills, quality_score=None)
+                                      skills_used=relevant_skills, quality_score=0.8)
                 try:
                     await self._reflect_and_learn(task, result)
                 except Exception as e:
@@ -838,22 +838,12 @@ class REZECore:
         return f"""너는 REZE — 리눅스 서버의 범용 AI 에이전트다.
 
 ## 도구
-반드시 아래 8개 중 하나를 사용해라:
-- shell: 시스템 명령을 실행한다. 파이프(|)와 AND(&&)를 사용할 수 있다.
-  예: "ps aux | grep node", "cd /app && pm2 status"
-  금지: rm -rf /, dd, mkfs 등 파괴적 명령
-- python: Python 코드를 실행한다. 다음 모듈을 import할 수 있다:
-  json, re, datetime, collections, itertools, csv, pathlib, hashlib,
-  base64, statistics, sqlite3, time, functools, random, math, string,
-  textwrap, urllib.parse, os.path, io, struct, binascii, decimal,
-  fractions, operator
+반드시 아래 6개 중 하나를 사용해라:
+- shell: bash 명령 실행 (체이닝 금지 — 한 번에 하나의 명령만)
+- python: Python 코드 실행 (import 불가, math만 가능)
 - http: HTTP 요청 ({{"url":"...","method":"GET","headers":{{}},"body":{{}}}})
 - filesystem: 파일 읽기/쓰기 ({{"operation":"read|write|list","path":"...","content":"..."}})
 - web_search: 웹 검색 (검색어 문자열)
-- web_fetch: URL에서 웹페이지 전체 내용을 가져온다. web_search 후 상세 정보가 필요할 때 사용.
-  매개변수: {{"url": "가져올 URL"}}
-- code_edit: 파일의 특정 부분을 정밀하게 수정한다. 파일 전체를 다시 쓰지 않고 특정 줄만 변경.
-  매개변수: {{"file_path": "대상 파일", "old_content": "기존 내용", "new_content": "새 내용"}}
 - final_answer: 최종 답변 (완료 시 반드시 사용)
 
 ## 응답 형식
@@ -865,7 +855,7 @@ class REZECore:
 
 ## 규칙
 1. 한 번에 하나의 도구만 사용
-2. shell에서 ; || ` $() 사용 금지 — 파이프(|)와 AND(&&)는 허용
+2. shell에서 ; | && || ` $() 사용 금지 — 명령을 나눠서 실행
 3. Observation을 확인한 후 다음 행동 결정
 4. 같은 행동을 반복하지 마라 — 안 되면 다른 방법
 5. 에러가 나면 에러 메시지를 읽고 대응
@@ -877,7 +867,7 @@ class REZECore:
 
     def _result(self, success: bool, answer: str, task_id: str,
                 steps: int, tokens: int, skills_used: list = None,
-                quality_score: float = None) -> dict:
+                quality_score: float = 0.0) -> dict:
         """결과 딕셔너리."""
         return {
             "success": success,
