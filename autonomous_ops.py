@@ -16,6 +16,55 @@ import logging
 logger = logging.getLogger("REZE.autonomous")
 
 
+# ============================================================
+# JARVIS Protocol — 자율운영 모드 설정
+# ============================================================
+
+JARVIS_CONFIG = {
+    # 허락 없이 실행 (DO_WITHOUT_ASKING)
+    "auto_execute": [
+        "blog_publish",           # 글 작성 + 발행
+        "blog_rewrite",           # 기존 글 개선/리라이트
+        "blog_format_improve",    # 표, 구조, 레이아웃 개선
+        "blog_screenshot",        # Playwright 스크린샷 추가
+        "blog_seo_optimize",      # SEO 메타, 제목, 구조 개선
+        "competitor_analysis",    # 경쟁 블로그 분석
+        "trend_research",         # 시장 트렌드 리서치
+        "content_gap_fill",       # 빠진 카테고리/타입 자동 채우기
+        "quality_improvement",    # banned phrases 제거, 품질 개선
+        "analytics_action",       # GA4 데이터 기반 자동 조치
+    ],
+
+    # 허락 필요 (ASK_BOSS)
+    "requires_approval": [
+        "self_code_modify",       # 자기 코드 수정
+        "new_skill_create",       # 새 스킬/도구 추가
+        "architecture_change",    # 시스템 구조 변경
+        "budget_impact",          # API 키 추가, 비용 발생 변경
+        "config_schema_change",   # SSOT 스키마 변경
+        "new_service_add",        # 새 서비스 연동
+    ],
+
+    # 보고만 (REPORT_ONLY)
+    "report_actions": [
+        "daily_summary",          # 오늘 뭐 했는지
+        "weekly_analytics",       # 주간 성과
+        "improvement_applied",    # 적용한 개선사항
+        "error_recovered",        # 자동 복구한 에러
+    ]
+}
+
+
+def is_auto_execute(action_type: str) -> bool:
+    """허락 없이 자동 실행 가능한 액션인지 확인."""
+    return action_type in JARVIS_CONFIG["auto_execute"]
+
+
+def requires_boss_approval(action_type: str) -> bool:
+    """보스 승인이 필요한 액션인지 확인."""
+    return action_type in JARVIS_CONFIG["requires_approval"]
+
+
 class AutonomousLoop:
     """
     범용 자율 루프.

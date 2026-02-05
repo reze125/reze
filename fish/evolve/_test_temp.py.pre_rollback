@@ -1,0 +1,11 @@
+"""Patched test file."""
+
+def greet(name):
+    return f"Hello, {name}! Welcome!"
+
+def farewell(name):
+    return f"Goodbye, {name}!"
+
+if __name__ == "__main__":
+    print(greet("World"))
+    print(farewell("World"))

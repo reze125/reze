@@ -97,6 +97,8 @@ class ToolExecutor:
                 result = await self._exec_web_fetch(tool_input)
             elif tool == "code_edit":
                 result = self._exec_code_edit(tool_input)
+            elif tool == "screenshot":
+                result = await self._exec_screenshot(tool_input)
             else:
                 result = f"ERROR: Unknown tool '{tool}'"
         except Exception as e:
@@ -375,6 +377,40 @@ class ToolExecutor:
         except Exception as e:
             return f"ERROR: {e}"
 
+    async def _exec_screenshot(self, request: Any) -> str:
+        """웹사이트 스크린샷 캡처 (Playwright)."""
+        from tools.screenshot import capture_screenshot, capture_tool_screenshot
+
+        if isinstance(request, str):
+            # URL만 전달된 경우
+            result = await capture_screenshot(request)
+        elif isinstance(request, dict):
+            # 상세 옵션
+            url = request.get("url", "")
+            if not url:
+                return "ERROR: url 필요"
+
+            # AI 도구 스크린샷 (tool_name 있으면)
+            tool_name = request.get("tool_name")
+            if tool_name:
+                result = await capture_tool_screenshot(tool_name, url)
+            else:
+                result = await capture_screenshot(
+                    url=url,
+                    filename=request.get("filename"),
+                    width=request.get("width", 1280),
+                    height=request.get("height", 720),
+                    full_page=request.get("full_page", False),
+                    timeout=request.get("timeout", 30000)
+                )
+        else:
+            return "ERROR: url string 또는 {url, filename?, width?, height?, full_page?, tool_name?} 필요"
+
+        if result.get("success"):
+            return f"OK: Screenshot saved\nPath: {result['path']}\nWeb: {result['web_path']}\nMarkdown: {result['markdown']}"
+        else:
+            return f"ERROR: {result.get('error', 'Unknown error')}"
+
     def get_tool_catalog(self) -> str:
         """LLM에게 전달할 도구 카탈로그."""
         return """사용 가능한 도구:
@@ -410,7 +446,14 @@ class ToolExecutor:
    edit: {"action": "edit", "path": "파일경로", "old_str": "찾을문자열", "new_str": "바꿀문자열"}
    create: {"action": "create", "path": "파일경로", "content": "내용"}
    list: {"action": "list", "path": "디렉토리경로"}
-   허용경로: /home/reze/reze-agent/, /home/reze/blogs/, /home/reze/projects/, /tmp/reze/"""
+   허용경로: /home/reze/reze-agent/, /home/reze/blogs/, /home/reze/projects/, /tmp/reze/
+
+7. screenshot: 웹사이트 스크린샷 캡처 (Playwright)
+   입력: URL 문자열 또는 {"url": "...", "filename": "...", "width": 1280, "height": 720, "full_page": false, "tool_name": "..."}
+   출력: 저장된 파일 경로 + 웹 경로 + 마크다운 태그
+   저장위치: ~/ai-tools-lab/public/screenshots/
+   예: "https://cursor.sh" → /screenshots/cursor-20260205.png
+   예: {"url": "https://claude.ai", "tool_name": "Claude"} → /screenshots/claude-screenshot.png"""
 
     # === v6.0: 제한된 도구 실행 (동적 스킬용) ===
 

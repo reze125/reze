@@ -44,7 +44,7 @@ BLOG_DB = {
 }
 
 # === 모델 ===
-CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
+CEREBRAS_MODEL = "llama-3.3-70b"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 GROQ_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
 
@@ -115,7 +115,7 @@ WRITE_ALLOWED_PATHS = [
     str(BASE_DIR / "docs"),
     str(BASE_DIR / "prompts"),
     str(BASE_DIR / "utils"),
-    str(Path.home() / "ai-tools-lab" / "content"),
+    str(Path.home() / "ai-tools-lab" / "src" / "content"),
     str(Path.home() / "nocodetoolslab" / "content"),
 ]
 

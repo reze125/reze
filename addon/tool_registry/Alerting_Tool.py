@@ -1,61 +1,59 @@
 import httpx
 import json
-import sys
+import time
 
-def send_notification(tool_name, description, service_name, error_message):
-    """
-    Send a notification using HTTP request.
-    
-    Args:
-    tool_name (str): The name of the tool.
-    description (str): The description of the tool.
-    service_name (str): The name of the service.
-    error_message (str): The error message to be sent.
-    """
-    notification_data = {
-        "tool_name": tool_name,
-        "description": description,
-        "service_name": service_name,
-        "error_message": error_message
-    }
-    try:
-        response = httpx.post("https://example.com/notifications", json=notification_data)
-        response.raise_for_status()
-    except httpx.RequestError as e:
-        print(f"Error sending notification: {e}")
+class AlertingTool:
+    def __init__(self, tool_name, description, service):
+        self.tool_name = tool_name
+        self.description = description
+        self.service = service
 
-def parse_cron_job(cron_job):
-    """
-    Parse the cron job and extract relevant information.
-    
-    Args:
-    cron_job (str): The cron job string.
-    
-    Returns:
-    dict: A dictionary containing the parsed cron job information.
-    """
-    parts = cron_job.split()
-    schedule = parts[0]
-    command = " ".join(parts[1:])
-    return {
-        "schedule": schedule,
-        "command": command
-    }
+    def check_service_status(self):
+        if self.service['type'] == 'pm2':
+            # For simplicity, assume we have a function to get the status of a pm2 service
+            # In a real-world scenario, you would use the pm2 API or a library like python-pm2
+            # to get the status of the service
+            status = self.get_pm2_service_status(self.service['name'])
+            if status != 'online':
+                self.send_alert(f"{self.service['name']} is {status}")
+            else:
+                print(f"{self.service['name']} is online")
+
+    def get_pm2_service_status(self, name):
+        # Simulate getting the status of a pm2 service
+        # In a real-world scenario, you would use the pm2 API or a library like python-pm2
+        # to get the status of the service
+        # For this example, assume the service is online
+        return 'online'
+
+    def send_alert(self, message):
+        # For simplicity, assume we have a function to send an alert
+        # In a real-world scenario, you would use a library like httpx to send a request
+        # to a service that can send alerts, such as a webhook or an email service
+        print(f"Sending alert: {message}")
+        try:
+            response = httpx.post('https://example.com/alert', json={'message': message})
+            if response.status_code != 200:
+                print(f"Failed to send alert: {response.text}")
+        except httpx.RequestError as e:
+            print(f"Failed to send alert: {e}")
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python alerting_tool.py <cron_job_string>")
-        sys.exit(1)
-    
-    cron_job_string = sys.argv[1]
-    cron_job_info = parse_cron_job(cron_job_string)
-    
-    tool_name = "Alerting Tool"
-    description = "To receive notifications on cron job failures or errors"
-    service_name = "cron_5434"
-    error_message = "Cron job failed"
-    
-    send_notification(tool_name, description, service_name, error_message)
+    data = {
+        "tool_name": "Alerting Tool",
+        "description": "To notify when the service goes offline or encounters issues",
+        "service": {
+            "type": "pm2",
+            "name": "reze-addon",
+            "meta": {
+                "status": "online"
+            }
+        }
+    }
+    tool = AlertingTool(data['tool_name'], data['description'], data['service'])
+    while True:
+        tool.check_service_status()
+        time.sleep(60)  # Check the service status every 60 seconds
 
 if __name__ == "__main__":
     main()

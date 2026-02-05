@@ -1,39 +1,305 @@
-name: "AI Tools Lab"
-domain: "aitoolslab.com"
-db_name: "aitoolslab_db"
-db_table: "articles"
-pm2_name: "ai-tools-lab"
+# AI Tools Lab — Astro Blog Configuration
+# REZE가 이 파일을 읽고 콘텐츠를 생성한다
 
-content:
-  niche: "AI tools reviews and comparisons"
-  target_audience: "tech-savvy professionals"
-  tone: "authoritative yet approachable"
-  article_types:
-    - "tool_review"
-    - "comparison"
-    - "roundup"
-    - "tutorial"
-  min_words: 1500
-  max_words: 3000
-  posting_schedule: "tue,fri"
+site:
+  name: "AI Tools Lab"
+  url: "https://aitoolslab.runstate.dev"
+  repo: "~/ai-tools-lab"
+  content_dir: "~/ai-tools-lab/src/content/blog"
+  brand_color: "#6366F1"
+  language: "en"
 
-seo:
-  primary_keywords: ["AI tools", "AI software", "best AI tools"]
-  competitor_sites: ["techradar.com/best/ai-tools", "zapier.com/blog"]
-  target_search_intent: "commercial investigation"
+# 콘텐츠 타입 정의 — frontmatter의 type과 일치해야 함
+content_types:
+  news:
+    label: "News"
+    color: "#EF4444"
+    description: "AI tool launches, updates, funding rounds, acquisitions"
+    schedule: "mon,wed,fri"
+    target_length: 600
+    tone: "informative, timely, authoritative"
+    requires_tavily: true
+    tavily_query_template: "latest {tool_name} AI tool news 2026"
 
-affiliate:
-  programs: ["impact", "shareasale", "direct"]
-  link_density: 3
+  top:
+    label: "Top Picks"
+    color: "#F59E0B"
+    description: "Rankings, best-of lists, curated recommendations"
+    schedule: "thu"
+    target_length: 1500
+    tone: "analytical, data-driven, opinionated"
+    requires_tavily: true
+    tavily_query_template: "best AI {category} tools 2026 comparison"
 
+  discovery:
+    label: "Discovery"
+    color: "#10B981"
+    description: "Hidden gem tools most people don't know about"
+    schedule: "tue,sat"
+    target_length: 800
+    tone: "excited, personal, storytelling"
+    requires_tavily: true
+    tavily_query_template: "underrated AI {category} tools 2026"
+
+  compare:
+    label: "Compare"
+    color: "#3B82F6"
+    description: "Head-to-head tool comparisons with structured data"
+    schedule: "wed"
+    target_length: 1200
+    tone: "objective, structured, fair"
+    requires_tavily: true
+    tavily_query_template: "{tool_a} vs {tool_b} comparison features pricing 2026"
+
+  review:
+    label: "Review"
+    color: "#8B5CF6"
+    description: "In-depth single tool reviews with ratings"
+    schedule: "fri"
+    target_length: 2000
+    tone: "thorough, honest, expert, TechRadar-level quality"
+    requires_tavily: true
+    tavily_query_template: "{tool_name} review features pricing pros cons 2026"
+
+# 카테고리 정의 — 사이트 사이드바와 일치 (11개)
+categories:
+  - id: "Chatbot"
+    label: "Chatbot"
+    keywords: ["chat", "assistant", "LLM", "claude", "gpt", "gemini"]
+  - id: "Coding"
+    label: "Coding"
+    keywords: ["code", "IDE", "developer", "programming", "copilot"]
+  - id: "Productivity"
+    label: "Productivity"
+    keywords: ["productivity", "notes", "calendar", "task", "notion"]
+  - id: "Image Gen"
+    label: "Image Gen"
+    keywords: ["image", "art", "midjourney", "dall-e", "stable diffusion"]
+  - id: "Research"
+    label: "Research"
+    keywords: ["research", "academic", "paper", "citation"]
+  - id: "Automation"
+    label: "Automation"
+    keywords: ["automation", "workflow", "zapier", "n8n", "make"]
+  - id: "Writing"
+    label: "Writing"
+    keywords: ["copywriting", "content", "grammar", "blog"]
+  - id: "Video"
+    label: "Video"
+    keywords: ["video", "editing", "animation", "screen recording"]
+  - id: "Audio"
+    label: "Audio"
+    keywords: ["audio", "voice", "TTS", "speech", "transcription", "music"]
+  - id: "Design"
+    label: "Design"
+    keywords: ["design", "UI", "UX", "figma", "canva"]
+  - id: "Business"
+    label: "Business"
+    keywords: ["business", "finance", "sales", "marketing", "CRM"]
+
+# Astro frontmatter 템플릿 — REZE가 이걸로 .md 파일 생성
+frontmatter_templates:
+  news: |
+    ---
+    title: "{title}"
+    description: "{description}"
+    type: "news"
+    category: "{category}"
+    date: {date}
+    readTime: "{read_time}"
+    featured: {featured}
+    draft: false
+    ---
+
+  top: |
+    ---
+    title: "{title}"
+    description: "{description}"
+    type: "top"
+    category: "{category}"
+    date: {date}
+    readTime: "{read_time}"
+    featured: {featured}
+    draft: false
+    ---
+
+  discovery: |
+    ---
+    title: "{title}"
+    description: "{description}"
+    type: "discovery"
+    category: "{category}"
+    date: {date}
+    readTime: "{read_time}"
+    featured: false
+    draft: false
+    ---
+
+  compare: |
+    ---
+    title: "{title}"
+    description: "{description}"
+    type: "compare"
+    category: "{category}"
+    date: {date}
+    readTime: "{read_time}"
+    featured: {featured}
+    draft: false
+    ---
+
+  review: |
+    ---
+    title: "{title}"
+    description: "{description}"
+    type: "review"
+    category: "{category}"
+    date: {date}
+    rating: {rating}
+    readTime: "{read_time}"
+    featured: {featured}
+    draft: false
+    ---
+
+# 발행 파이프라인
+publish:
+  method: "git"
+  steps:
+    - "파일 생성: {content_dir}/{slug}.md"
+    - "git add ."
+    - "git commit -m 'publish: {title}'"
+    - "npm run build"
+    - "cp -r dist/* ~/aitoolslab-static/"
+  post_publish:
+    - "Discord BLOG 웹훅 알림"
+    - "SSOT log_event: blog_published"
+
+# 품질 기준 — Self-Refine에서 사용
 quality:
-  min_score: 85
-  comparison_standard: "TechRadar"
+  min_word_count: 500
+  max_word_count: 3000
+  banned_phrases:
+    - "in this article"
+    - "in today's world"
+    - "game-changer"
+    - "revolutionize"
+    - "dive into"
+    - "let's explore"
+    - "without further ado"
+    - "it's worth noting"
+    - "in conclusion"
+    - "at the end of the day"
+  required_sections:
+    review: ["overview", "features", "pricing", "verdict"]
+    compare: ["overview", "comparison_table", "verdict"]
+    top: ["intro", "rankings", "methodology"]
+  # 스크린샷 필수 규칙
+  screenshot_requirements:
+    review:
+      min_screenshots: 1
+      description: "도구 메인 화면 스크린샷 필수"
+    compare:
+      min_screenshots: 2
+      description: "비교 대상 도구별 최소 1장씩"
+    discovery:
+      min_screenshots: 0
+      description: "선택 사항"
+    news:
+      min_screenshots: 0
+      description: "선택 사항"
+    top:
+      min_screenshots: 0
+      description: "선택 사항 (헤더 이미지로 대체 가능)"
+  competitor_benchmarks:
+    - "TechRadar"
+    - "Zapier Blog"
+    - "There's An AI For That"
+    - "Future Tools"
 
-branding:
-  primary_color: "#4F46E5"
-  logo_path: "/assets/aitoolslab-logo.png"
+  # Few-shot examples (article types → existing quality posts)
+  few_shot_examples:
+    review: "jasper-ai-copywriting-review.md"
+    compare: "elevenlabs-vs-openai-tts.md"
+    top: "best-ai-sales-tools-2026.md"
+    discovery: "galileo-ai-ui-design.md"
+    news: "runway-gen3-video-generation.md"
 
-monitoring:
-  analytics: "plausible"
-  health_check_url: "https://aitoolslab.com/api/health"
+# 주간 발행 스케줄 (주 12글)
+weekly_schedule:
+  monday:
+    - { type: "news", category: "auto", time: "10:00" }
+    - { type: "discovery", category: "auto", time: "14:00" }
+  tuesday:
+    - { type: "compare", category: "auto", time: "10:00" }
+    - { type: "news", category: "auto", time: "14:00" }
+  wednesday:
+    - { type: "discovery", category: "auto", time: "10:00" }
+    - { type: "news", category: "auto", time: "14:00" }
+  thursday:
+    - { type: "top", category: "auto", time: "10:00" }
+    - { type: "review", category: "auto", time: "14:00" }
+  friday:
+    - { type: "review", category: "auto", time: "10:00" }
+    - { type: "news", category: "auto", time: "14:00" }
+  saturday:
+    - { type: "discovery", category: "auto", time: "10:00" }
+    - { type: "top", category: "auto", time: "14:00" }
+
+# ============================================================
+# JARVIS Protocol — 자율운영 규칙
+# ============================================================
+jarvis_rules:
+  # 자동 리라이트 트리거
+  auto_rewrite_triggers:
+    bounce_rate_above: 75      # 이탈률 75% 이상이면 자동 리라이트
+    avg_duration_below: 45     # 체류시간 45초 미만이면 자동 개선
+    zero_traffic_days: 7       # 7일간 조회수 0이면 제목+메타 변경
+
+  # 자동 발행 규칙
+  auto_publish_rules:
+    max_posts_per_day: 3       # 하루 최대 3건 (과발행 방지)
+    min_quality_score: 7.0     # Self-Refine 점수 7.0 이상만 발행
+    require_table: true        # 모든 글에 최소 1개 마크다운 표 필수
+    require_pricing: true      # review/compare에 가격 정보 필수
+    banned_phrases_check: true # 발행 전 banned phrases 자동 체크
+
+  # 경쟁사 분석 규칙
+  competitor_rules:
+    crawl_frequency: "daily"
+    sources:
+      - "TechRadar"
+      - "Zapier Blog"
+      - "There's An AI For That"
+      - "Future Tools"
+      - "Ben's Bites"
+      - "The Neuron"
+    auto_apply_improvements: true  # 발견한 개선점 즉시 적용
+
+  # 셀프 에볼루션 (승인 필요)
+  evolution_requires_approval:
+    - "자기 코드 수정"
+    - "새 스킬/도구 추가"
+    - "시스템 구조 변경"
+    - "비용 발생 변경"
+    - "SSOT 스키마 변경"
+
+  # 승인 없이 자동 실행
+  auto_execute_no_approval:
+    - "글 작성/발행"
+    - "글 리라이트/개선"
+    - "표/비교표 추가"
+    - "스크린샷 추가"
+    - "SEO 최적화"
+    - "내부 링크 추가"
+    - "제목/메타 수정"
+    - "경쟁사 패턴 적용"
+
+  # Discord 보고 스타일
+  discord_style:
+    tone: "친근한 후배/비서"
+    formality: "반말+요 mix (해요체 기본)"
+    emoji: "자연스럽게 가끔 (과하지 않게)"
+    length: "메시지당 3-5줄, 길면 나눠서"
+    no_headers: true
+    no_bullet_points: true
+    no_tables: true
+    feel: "카톡/슬랙 DM 느낌"

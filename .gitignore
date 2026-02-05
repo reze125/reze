@@ -7,3 +7,7 @@ workspace/
 __pycache__/
 *.pyc
 .env.*
+*.db
+*.sqlite
+credentials/
+data/

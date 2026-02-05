@@ -2,59 +2,31 @@ import httpx
 import json
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-def get_container_info(container_id):
-    """Get container info from Docker API"""
-    url = f"http://localhost:2375/containers/{container_id}/json"
+def get_service_info(service_id: int) -> dict:
+    """Retrieve service information from the API."""
+    url = f"https://example.com/services/{service_id}"
     response = httpx.get(url)
     if response.status_code == 200:
         return response.json()
     else:
-        logger.error(f"Failed to get container info: {response.text}")
-        return None
+        logging.error(f"Failed to retrieve service info: {response.text}")
+        return {}
 
-def get_container_logs(container_id):
-    """Get container logs from Docker API"""
-    url = f"http://localhost:2375/containers/{container_id}/logs"
-    response = httpx.get(url)
-    if response.status_code == 200:
-        return response.text
-    else:
-        logger.error(f"Failed to get container logs: {response.text}")
-        return None
+def monitor_container(service_info: dict) -> None:
+    """Monitor Docker container performance and logs."""
+    service_meta = json.loads(service_info.get("service_meta", "{}"))
+    image = service_meta.get("image")
+    ports = service_meta.get("ports")
+    logging.info(f"Monitoring container {image} with ports {ports}")
 
-def monitor_container(container_id):
-    """Monitor container performance and logs"""
-    info = get_container_info(container_id)
-    if info:
-        logger.info(f"Container {container_id} info: {info}")
-    logs = get_container_logs(container_id)
-    if logs:
-        logger.info(f"Container {container_id} logs: {logs}")
-
-def main():
-    # Load service data from JSON
-    service_data = {
-        "tool_name": "Docker Container Monitoring",
-        "description": "Tool to monitor and manage Docker container performance and logs",
-        "service": {
-            "id": 3,
-            "service_type": "docker",
-            "service_name": "listmonk",
-            "service_meta": "{\"image\": \"listmonk/listmonk:latest\", \"ports\": \"0.0.0.0:9000->9000/tcp, [::]:9000->9000/tcp\"}",
-            "discovered_at": "2026-02-03 10:30:29",
-            "status": "new"
-        }
-    }
-
-    # Extract container ID from service data
-    container_id = service_data["service"]["id"]
-
-    # Monitor container
-    monitor_container(container_id)
+def main() -> None:
+    """Main entry point for the Docker Container Monitoring tool."""
+    service_id = 7
+    service_info = get_service_info(service_id)
+    if service_info:
+        monitor_container(service_info)
 
 if __name__ == "__main__":
     main()

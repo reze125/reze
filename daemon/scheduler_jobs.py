@@ -1986,3 +1986,407 @@ async def task_queue_processor_job():
 
     except Exception as e:
         logger.error(f"Task queue processor failed: {e}")
+
+
+# ============================================================
+# Blog Automation Jobs (AI Tools Lab)
+# ============================================================
+
+async def blog_daily_schedule_job():
+    """매일 00:05: 오늘의 블로그 발행 스케줄 등록."""
+    logger.info("Running blog daily schedule")
+    try:
+        from blog_task_scheduler import register_daily_blog_tasks
+
+        registered = register_daily_blog_tasks(state.ssot)
+
+        if registered:
+            logger.info(f"[BLOG] Today's schedule registered: {len(registered)} posts")
+            state.ssot.save_signal("blog_schedule_registered", json.dumps({
+                "date": datetime.now(config.KST).strftime("%Y-%m-%d"),
+                "tasks": registered
+            }))
+
+            if state.alert_manager:
+                posts_summary = ", ".join(f"{t['type']}@{t['time']}" for t in registered)
+                await state.alert_manager.send(
+                    "info", "blog_schedule",
+                    f"오늘 블로그 스케줄: {posts_summary}"
+                )
+        else:
+            logger.info("[BLOG] No posts scheduled for today")
+
+    except Exception as e:
+        logger.error(f"Blog daily schedule failed: {e}")
+
+
+async def blog_weekly_review_job():
+    """매주 일요일 09:00: 주간 블로그 성과 리뷰."""
+    logger.info("Running blog weekly review")
+    try:
+        from blog_task_scheduler import get_weekly_stats
+        from tools.blog_analytics import check_blog_analytics, get_content_performance
+
+        # 1. 발행 통계
+        publish_stats = get_weekly_stats(state.ssot)
+
+        # 2. GA4 트래픽 분석
+        analytics = check_blog_analytics("7d")
+
+        # 3. 콘텐츠 성과
+        performance = get_content_performance(days=7)
+
+        # 4. LLM 분석
+        analysis = await state.router.call(
+            "reasoning",
+            [{
+                "role": "user",
+                "content": f"""AI Tools Lab 주간 블로그 리뷰.
+
+발행 통계:
+- 총 발행: {publish_stats.get('total_published', 0)}개
+- 타입별: {publish_stats.get('by_type', {})}
+
+트래픽 (GA4):
+- 방문자: {analytics.get('traffic', {}).get('active_users', 'N/A')}
+- 페이지뷰: {analytics.get('traffic', {}).get('pageviews', 'N/A')}
+- 평균 체류: {analytics.get('traffic', {}).get('avg_session_duration', 'N/A')}초
+- 이탈률: {analytics.get('traffic', {}).get('bounce_rate', 'N/A')}%
+
+인기 페이지:
+{json.dumps(analytics.get('top_pages', [])[:5], ensure_ascii=False, indent=2)}
+
+다음 주 개선점 3가지 + 추천 콘텐츠 주제 2개를 JSON으로:
+{{"improvements": ["..."], "recommended_topics": ["..."]}}
+JSON만 반환."""
+            }],
+            system="블로그 콘텐츠 전략가."
+        )
+
+        text = analysis.text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        try:
+            review_result = json.loads(text)
+        except json.JSONDecodeError:
+            review_result = {"raw": text[:500]}
+
+        # 5. 저장
+        state.ssot.save_signal("blog_weekly_review", json.dumps({
+            "week": publish_stats.get("week_start"),
+            "published": publish_stats.get("total_published", 0),
+            "traffic": analytics.get("traffic", {}),
+            "analysis": review_result
+        }))
+
+        # 6. 알림
+        if state.alert_manager:
+            msg = (
+                f"**AI Tools Lab 주간 리뷰**\n"
+                f"발행: {publish_stats.get('total_published', 0)}개\n"
+                f"방문자: {analytics.get('traffic', {}).get('active_users', 'N/A')}\n"
+                f"개선점: {', '.join(review_result.get('improvements', [])[:2])}"
+            )
+            await state.alert_manager.send("info", "blog_weekly_review", msg[:1900])
+
+        logger.info(f"[BLOG] Weekly review completed: {publish_stats.get('total_published', 0)} posts")
+
+    except Exception as e:
+        logger.error(f"Blog weekly review failed: {e}")
+
+
+async def blog_market_research_job():
+    """매주 월요일 08:00: AI 도구 시장 리서치 → 콘텐츠 아이디어."""
+    logger.info("Running blog market research")
+    try:
+        # 1. Tavily 검색
+        search_results = []
+        queries = [
+            "new AI tools 2025",
+            "AI productivity tools comparison",
+            "best AI writing assistant",
+            "AI automation trends"
+        ]
+
+        for query in queries:
+            try:
+                result = await _tavily_search_fn(query, max_results=3)
+                if result:
+                    search_results.extend(result[:2])
+            except Exception as e:
+                logger.warning(f"Tavily search failed for '{query}': {e}")
+
+        if not search_results:
+            logger.warning("[BLOG] No search results, skipping market research")
+            return
+
+        # 2. LLM 분석
+        analysis = await state.router.call(
+            "reasoning",
+            [{
+                "role": "user",
+                "content": f"""AI 도구 시장 리서치 결과를 분석하고 블로그 콘텐츠 아이디어 제안.
+
+검색 결과:
+{json.dumps(search_results[:10], ensure_ascii=False, indent=2)}
+
+JSON으로 응답:
+{{
+    "trending_tools": [{{"name": "...", "category": "...", "why_notable": "..."}}],
+    "content_ideas": [
+        {{"type": "news", "title": "...", "keywords": [...]}},
+        {{"type": "compare", "title": "...", "tools_to_compare": [...]}},
+        {{"type": "review", "title": "...", "tool": "..."}}
+    ],
+    "market_insights": ["..."]
+}}
+JSON만 반환."""
+            }],
+            system="AI 도구 시장 분석가. 트렌드 발견 + 콘텐츠 기획."
+        )
+
+        text = analysis.text.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+
+        try:
+            research_result = json.loads(text)
+        except json.JSONDecodeError:
+            research_result = {"raw": text[:500]}
+
+        # 3. 콘텐츠 아이디어를 태스크로 등록
+        for idea in research_result.get("content_ideas", [])[:2]:
+            task_spec = (
+                f"[BLOG] {idea.get('type', 'news').upper()}: {idea.get('title', 'AI Tools Article')}\n"
+                f"Keywords: {', '.join(idea.get('keywords', []))}"
+            )
+            state.ssot.enqueue(task_spec, priority=3, source="market_research")
+            logger.info(f"[BLOG] Content idea queued: {idea.get('title', '')[:50]}")
+
+        # 4. 저장
+        state.ssot.save_signal("blog_market_research", json.dumps({
+            "date": datetime.now(config.KST).strftime("%Y-%m-%d"),
+            "trending_tools": research_result.get("trending_tools", []),
+            "content_ideas": research_result.get("content_ideas", []),
+            "insights": research_result.get("market_insights", [])
+        }))
+
+        # 5. 알림
+        if state.alert_manager:
+            tools = research_result.get("trending_tools", [])
+            ideas = research_result.get("content_ideas", [])
+            msg = (
+                f"**AI Tools Lab 시장 리서치**\n"
+                f"트렌딩 도구: {', '.join(t.get('name', '') for t in tools[:3])}\n"
+                f"콘텐츠 아이디어: {len(ideas)}개 큐에 추가"
+            )
+            await state.alert_manager.send("info", "blog_market_research", msg[:1900])
+
+        logger.info(f"[BLOG] Market research completed: {len(research_result.get('content_ideas', []))} ideas")
+
+    except Exception as e:
+        logger.error(f"Blog market research failed: {e}")
+
+
+# ============================================================
+# JARVIS Protocol Jobs — 자율운영 모드
+# ============================================================
+
+async def blog_competitor_crawl_job():
+    """매일 06:00 — 경쟁 블로그 크롤링 + 개선점 자동 적용."""
+    logger.info("[JARVIS] Running competitor crawl job")
+    try:
+        # 1. 경쟁사 최신 글 검색
+        competitor_sources = [
+            "TechRadar AI tools review",
+            "Zapier blog AI automation",
+            "There's An AI For That new tools",
+            "Future Tools AI directory",
+        ]
+
+        all_results = []
+        for source in competitor_sources:
+            try:
+                results = await _tavily_search_fn(f"{source} 2026")
+                if results:
+                    all_results.extend(results[:2])
+            except Exception as e:
+                logger.warning(f"[JARVIS] Search failed for {source}: {e}")
+
+        if not all_results:
+            logger.info("[JARVIS] No competitor results found")
+            return
+
+        # 2. LLM 분석 — 개선점 추출
+        analysis = await state.router.call(
+            "reasoning",
+            [{
+                "role": "user",
+                "content": f"""경쟁 블로그 분석 결과를 보고 AI Tools Lab에 적용할 개선점을 찾아라.
+
+검색 결과:
+{json.dumps(all_results[:8], ensure_ascii=False, indent=2)}
+
+JSON으로 응답:
+{{
+    "patterns_found": [
+        {{"pattern": "비교표 사용", "source": "TechRadar", "apply_to": "기존 review 글들"}}
+    ],
+    "new_tools_discovered": [
+        {{"name": "도구명", "category": "카테고리", "why_notable": "이유"}}
+    ],
+    "seo_insights": ["발견한 SEO 패턴"],
+    "immediate_actions": [
+        {{"action": "기존 글 수정/새 글 작성", "target": "파일명 또는 주제", "change": "변경 내용"}}
+    ]
+}}
+JSON만 반환."""
+            }],
+            system="경쟁사 분석 전문가. 실행 가능한 인사이트만 추출."
+        )
+
+        text = analysis.text.strip().replace("```json", "").replace("```", "").strip()
+        try:
+            insights = json.loads(text)
+        except json.JSONDecodeError:
+            insights = {"raw": text[:500]}
+
+        # 3. 새 도구 발견 시 글 작성 태스크 등록
+        for tool in insights.get("new_tools_discovered", [])[:2]:
+            task_spec = (
+                f"[BLOG:aitoolslab] Discovery 글 작성 및 발행\n"
+                f"카테고리: {tool.get('category', 'Productivity')}\n"
+                f"주제: {tool.get('name', 'New AI Tool')}\n"
+                f"톤: excited, personal, storytelling\n"
+                f"목표 길이: 800단어\n"
+                f"특이사항: {tool.get('why_notable', '')}"
+            )
+            state.ssot.enqueue(task_spec, priority=2, source="jarvis_competitor")
+            logger.info(f"[JARVIS] New tool queued: {tool.get('name', '')}")
+
+        # 4. Signal 저장
+        state.ssot.save_signal("jarvis_competitor_analysis", json.dumps({
+            "date": datetime.now(config.KST).strftime("%Y-%m-%d"),
+            "patterns": insights.get("patterns_found", []),
+            "new_tools": insights.get("new_tools_discovered", []),
+            "actions": insights.get("immediate_actions", [])
+        }))
+
+        # 5. Discord 보고 (카톡 스타일)
+        if state.alert_manager:
+            patterns = insights.get("patterns_found", [])
+            tools = insights.get("new_tools_discovered", [])
+            msg = (
+                f"아침에 경쟁사 훑어봤는데요\n"
+                f"새 도구 {len(tools)}개 발견했어요"
+            )
+            if tools:
+                msg += f"\n{', '.join(t.get('name', '') for t in tools[:3])}"
+            if patterns:
+                msg += f"\n\n패턴도 {len(patterns)}개 찾았어요"
+                msg += f"\n{patterns[0].get('pattern', '')} 같은거요"
+            await state.alert_manager.send("info", "jarvis_competitor", msg[:500])
+
+        logger.info(f"[JARVIS] Competitor analysis done: {len(insights.get('new_tools_discovered', []))} tools found")
+
+    except Exception as e:
+        logger.error(f"[JARVIS] Competitor crawl failed: {e}")
+
+
+async def blog_auto_improve_job():
+    """매일 22:00 — GA4 데이터 기반 자동 개선."""
+    logger.info("[JARVIS] Running auto-improve job")
+    try:
+        from tools.blog_analytics import check_blog_analytics
+
+        # 1. GA4 데이터 조회
+        analytics = check_blog_analytics("1d")
+
+        if analytics.get("status") != "ok":
+            logger.warning(f"[JARVIS] GA4 unavailable: {analytics.get('message', 'unknown')}")
+            # GA4 없어도 기본 보고는 전송
+            if state.alert_manager:
+                await state.alert_manager.send(
+                    "info", "jarvis_daily",
+                    "오늘 GA4 데이터 못 가져왔어요\n내일 다시 확인할게요"
+                )
+            return
+
+        traffic = analytics.get("traffic", {})
+        top_pages = analytics.get("top_pages", [])
+
+        # 2. 문제 글 식별
+        problems = []
+        for page in top_pages:
+            bounce = page.get("bounce_rate", 0)
+            duration = page.get("avg_duration", 0)
+
+            if bounce > 75:
+                problems.append({
+                    "path": page["path"],
+                    "issue": "high_bounce",
+                    "value": bounce
+                })
+            elif duration < 45:
+                problems.append({
+                    "path": page["path"],
+                    "issue": "low_duration",
+                    "value": duration
+                })
+
+        # 3. 개선 태스크 등록 (문제 글 있으면)
+        for problem in problems[:2]:
+            slug = problem["path"].strip("/").split("/")[-1]
+            if problem["issue"] == "high_bounce":
+                task_spec = (
+                    f"[BLOG:aitoolslab] 글 개선\n"
+                    f"대상: {slug}\n"
+                    f"문제: 이탈률 {problem['value']:.0f}%\n"
+                    f"조치: 도입부 리라이트 + 내부 링크 추가\n"
+                    f"jarvis_mode: true"
+                )
+            else:
+                task_spec = (
+                    f"[BLOG:aitoolslab] 글 개선\n"
+                    f"대상: {slug}\n"
+                    f"문제: 체류시간 {problem['value']:.0f}초\n"
+                    f"조치: 비교표 또는 상세 섹션 추가\n"
+                    f"jarvis_mode: true"
+                )
+            state.ssot.enqueue(task_spec, priority=2, source="jarvis_improve")
+            logger.info(f"[JARVIS] Improvement queued: {slug}")
+
+        # 4. Signal 저장
+        state.ssot.save_signal("jarvis_daily_analytics", json.dumps({
+            "date": datetime.now(config.KST).strftime("%Y-%m-%d"),
+            "sessions": traffic.get("sessions", 0),
+            "pageviews": traffic.get("pageviews", 0),
+            "bounce_rate": traffic.get("bounce_rate", 0),
+            "problems_found": len(problems),
+            "improvements_queued": min(len(problems), 2)
+        }))
+
+        # 5. Discord 일일 보고 (카톡 스타일)
+        if state.alert_manager:
+            sessions = int(traffic.get("sessions", 0))
+            pageviews = int(traffic.get("pageviews", 0))
+            bounce = traffic.get("bounce_rate", 0)
+
+            msg = f"오늘 트래픽 {sessions}세션, {pageviews}페이지뷰"
+            if bounce > 0:
+                msg += f"\n이탈률 {bounce:.0f}%"
+
+            if top_pages:
+                best = top_pages[0]
+                msg += f"\n\n제일 잘 나간 글: {best.get('path', '').split('/')[-1]}"
+                msg += f" ({best.get('pageviews', 0)}뷰)"
+
+            if problems:
+                msg += f"\n\n개선 필요한 글 {len(problems)}개 찾았어요"
+                msg += f"\n내일 자동으로 수정할게요"
+
+            await state.alert_manager.send("info", "jarvis_daily", msg[:500])
+
+        logger.info(f"[JARVIS] Daily analytics done: {traffic.get('sessions', 0)} sessions")
+
+    except Exception as e:
+        logger.error(f"[JARVIS] Auto-improve failed: {e}")
