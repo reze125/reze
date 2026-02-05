@@ -15,6 +15,7 @@ REZE v6.0 SOVEREIGN — Phase 5: PREDATOR EVOLUTION 완전체
 Wave 1: 흡수 + 소화
 Wave 2: 학습 + 적용 + 검증
 Wave 3: 시뮬레이션 + MultiHeart
+Wave 4: TIER 2/3 흡수 모듈 (Tavily 기반)
 """
 
 # Schema and Migrations
@@ -73,6 +74,28 @@ from fish.predator.multiheart import (
     CATEGORIES_ROTATION
 )
 
+# Wave 4: TIER 2/3 Absorbers (Tavily-based)
+from fish.predator.tavily_util import (
+    TavilyPool,
+    get_tavily_pool
+)
+from fish.predator.tier2_absorber import (
+    Tier2Absorber,
+    PatentScanner,
+    FundingRadar,
+    JobSignal,
+    RegulationWatch,
+    CompetitionWatch,
+    TechStackTrend
+)
+from fish.predator.tier3_absorber import (
+    Tier3Absorber,
+    ConferenceHarvester,
+    PostmortemCollector,
+    OpenDataHarvester,
+    EcosystemMap
+)
+
 __all__ = [
     # Schema
     "PREDATOR_TABLES",
@@ -113,6 +136,22 @@ __all__ = [
     # Wave 3: MultiHeart
     "MultiHeart",
     "CATEGORIES_ROTATION",
+
+    # Wave 4: TIER 2/3 Absorbers
+    "TavilyPool",
+    "get_tavily_pool",
+    "Tier2Absorber",
+    "PatentScanner",
+    "FundingRadar",
+    "JobSignal",
+    "RegulationWatch",
+    "CompetitionWatch",
+    "TechStackTrend",
+    "Tier3Absorber",
+    "ConferenceHarvester",
+    "PostmortemCollector",
+    "OpenDataHarvester",
+    "EcosystemMap",
 
     # Convenience
     "run_predator_cycle",

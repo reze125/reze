@@ -1519,6 +1519,28 @@ Suggest:
             except Exception as e:
                 logger.error("PREDATOR dream failed: %s", e)
 
+        # Wave 4: TIER 2 주간 흡수 — 매주 월요일 06:30
+        if now.weekday() == 0 and now.hour == 6 and 25 <= now.minute <= 35:
+            try:
+                from fish.predator import Tier2Absorber
+                tier2 = Tier2Absorber()
+                t2_result = await tier2.weekly_absorb()
+                result["tier2"] = t2_result
+                logger.info("🔍 TIER2 weekly: %d items", t2_result.get("total_stored", 0))
+            except Exception as e:
+                logger.error("TIER2 weekly absorb failed: %s", e)
+
+        # Wave 4: TIER 3 월간 흡수 — 매월 1일 07:00
+        if now.day == 1 and now.hour == 7 and now.minute < 10:
+            try:
+                from fish.predator import Tier3Absorber
+                tier3 = Tier3Absorber()
+                t3_result = await tier3.monthly_absorb()
+                result["tier3"] = t3_result
+                logger.info("🔬 TIER3 monthly: %d items", t3_result.get("total_stored", 0))
+            except Exception as e:
+                logger.error("TIER3 monthly absorb failed: %s", e)
+
         return result
 
     async def _act_emergency(self, data: dict) -> Result:
